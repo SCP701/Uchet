@@ -1,5 +1,6 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing;
 using System.Globalization;
@@ -103,18 +104,18 @@ namespace WorkLedger
             currency.SelectedItem = (store.Of("settings").FirstOrDefault() ?? new Record("settings")).Get("currency"); if (currency.SelectedIndex < 0) currency.SelectedIndex = 0;
             party.Width = 200; party.DropDownStyle = ComboBoxStyle.DropDownList; party.AccessibleName = "Фильтр контрагентов";
             direction.Width = 150; direction.DropDownStyle = ComboBoxStyle.DropDownList; direction.Items.AddRange(new object[] { "Оба направления", "Нам платят", "Мы платим" }); direction.SelectedIndex = 0;
-            from.Width = to.Width = 132; from.Format = to.Format = DateTimePickerFormat.Custom; from.CustomFormat = to.CustomFormat = "dd.MM.yyyy"; from.ShowCheckBox = to.ShowCheckBox = true;
+            from.Width = to.Width = 166; from.Format = to.Format = DateTimePickerFormat.Custom; from.CustomFormat = to.CustomFormat = "dd.MM.yyyy"; from.ShowCheckBox = to.ShowCheckBox = true;
             from.Value = new DateTime(DateTime.Today.Year, 1, 1); to.Value = DateTime.Today; from.Checked = to.Checked = false;
             project.Width = 200; project.DropDownStyle = ComboBoxStyle.DropDownList; project.AccessibleName = "Фильтр объектов";
             status.Width = 185; status.DropDownStyle = ComboBoxStyle.DropDownList; status.AccessibleName = "Состояние записи";
             period.Width = 165; period.DropDownStyle = ComboBoxStyle.DropDownList; period.AccessibleName = "Быстрый период";
-            period.Items.AddRange(new object[] { "Произвольный", "Сегодня", "Этот месяц", "Прошлый месяц", "Этот год" }); period.SelectedIndex = 0;
+            period.Items.AddRange(new object[] { "За всё время", "Сегодня", "Этот месяц", "Прошлый месяц", "Этот год", "Произвольный" }); period.SelectedIndex = 0;
             currency.AccessibleName = "Фильтр валюты"; direction.AccessibleName = "Направление расчётов";
             from.AccessibleName = "Начало периода"; to.AccessibleName = "Конец периода";
             archived.Text = "Показывать архив"; archived.AutoSize = true; archived.Tag = "filter:archive"; archived.Margin = new Padding(6, 6, 0, 0);
             filterTips.SetToolTip(search, "Все слова запроса ищутся в записи, примечаниях и связанных документах. Регистр и ё/е не важны.");
-            filterTips.SetToolTip(from, "Включите галочку, чтобы ограничить дату снизу. Указанный день входит в период.");
-            filterTips.SetToolTip(to, "Включите галочку, чтобы ограничить дату сверху. Указанный день входит в период.");
+            filterTips.SetToolTip(from, "Выберите начальную дату или включите галочку. Указанный день входит в период. Снимите галочку, чтобы убрать начальную границу.");
+            filterTips.SetToolTip(to, "Выберите конечную дату или включите галочку. Указанный день входит в период. Снимите галочку, чтобы убрать конечную границу.");
             filterTips.SetToolTip(archived, "Показывает действующие и архивные записи. Архив не исключается из финансовых отчётов.");
             AddFilter(filters, "Поиск", search, "search"); AddFilter(filters, "Валюта", currency, "currency");
             AddFilter(filters, "Контрагент", party, "party"); AddFilter(filters, "Объект", project, "project");
@@ -124,12 +125,19 @@ namespace WorkLedger
             foreach (var combo in new[] { currency, party, project, direction, status }) combo.SelectedIndexChanged += delegate { RefreshView(); };
             period.SelectedIndexChanged += delegate { ApplyPeriod(); };
             from.ValueChanged += delegate { CustomPeriod(); RefreshView(); }; to.ValueChanged += delegate { CustomPeriod(); RefreshView(); }; archived.CheckedChanged += delegate { RefreshView(); };
+            foreach (var boundary in new[] { from, to })
+            {
+                boundary.MouseUp += delegate { DateBoundaryStateChanged(); };
+                boundary.KeyUp += delegate { DateBoundaryStateChanged(); };
+                boundary.CloseUp += delegate { DateBoundaryStateChanged(); };
+            }
             report.Width = 285; report.DropDownStyle = ComboBoxStyle.DropDownList;
             report.Items.AddRange(new object[] { "Задолженность по актам", "Прибыль по объектам", "Сверка с контрагентом", "Выполнение договоров", "Движение денег", "Документы и сроки" });
             report.SelectedIndex = 0; report.SelectedIndexChanged += delegate { ConfigureFilters(false); RefreshView(); };
             grid.Dock = DockStyle.Fill; grid.ReadOnly = true; grid.AllowUserToAddRows = false; grid.AllowUserToDeleteRows = false;
             grid.RowHeadersVisible = false; grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect; grid.MultiSelect = false;
             grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.DisplayedCells; UiStyle.ApplyGrid(grid);
+            grid.SortCompare += CompareDates;
             grid.CellDoubleClick += delegate(object sender, DataGridViewCellEventArgs e) { if (e.RowIndex >= 0) Edit(); };
             overview.Dock = DockStyle.Fill; overview.AutoScroll = true; overview.BackColor = Background;
             count.Dock = DockStyle.Bottom; count.Height = 27; count.AutoEllipsis = true; count.ForeColor = UiStyle.Muted; count.Font = new Font("Segoe UI", 9);
@@ -382,23 +390,68 @@ namespace WorkLedger
         private bool InPeriod(DateTime date) { return !DateRangeActive || ((!from.Checked || date.Date >= from.Value.Date) && (!to.Checked || date.Date <= to.Value.Date)); }
         private void CustomPeriod()
         {
-            if (refreshing || period.SelectedIndex == 0) return;
-            bool previous = refreshing; refreshing = true; period.SelectedIndex = 0; refreshing = previous;
+            if (refreshing) return;
+            int choice = from.Checked || to.Checked ? 5 : 0;
+            if (period.SelectedIndex == choice) return;
+            bool previous = refreshing; refreshing = true; period.SelectedIndex = choice; refreshing = previous;
         }
         private void ApplyPeriod()
         {
-            if (refreshing || period.SelectedIndex <= 0) return;
+            if (refreshing || period.SelectedIndex < 0 || period.SelectedIndex == 5) return;
             bool previous = refreshing; refreshing = true;
             try
             {
-                DateTime today = DateTime.Today, begin = today, end = today;
-                if (period.SelectedIndex == 2) { begin = new DateTime(today.Year, today.Month, 1); end = begin.AddMonths(1).AddDays(-1); }
-                else if (period.SelectedIndex == 3) { end = new DateTime(today.Year, today.Month, 1).AddDays(-1); begin = new DateTime(end.Year, end.Month, 1); }
-                else if (period.SelectedIndex == 4) { begin = new DateTime(today.Year, 1, 1); end = new DateTime(today.Year, 12, 31); }
-                from.Value = begin; to.Value = end; from.Checked = to.Checked = true;
+                if (period.SelectedIndex == 0) from.Checked = to.Checked = false;
+                else
+                {
+                    DateTime today = DateTime.Today, begin = today, end = today;
+                    if (period.SelectedIndex == 2) { begin = new DateTime(today.Year, today.Month, 1); end = begin.AddMonths(1).AddDays(-1); }
+                    else if (period.SelectedIndex == 3) { end = new DateTime(today.Year, today.Month, 1).AddDays(-1); begin = new DateTime(end.Year, end.Month, 1); }
+                    else if (period.SelectedIndex == 4) { begin = new DateTime(today.Year, 1, 1); end = new DateTime(today.Year, 12, 31); }
+                    from.Value = begin; to.Value = end; from.Checked = to.Checked = true;
+                }
             }
             finally { refreshing = previous; }
             RefreshView();
+        }
+        private void DateBoundaryStateChanged()
+        {
+            if (refreshing || (from.CustomFormat == DateBoundaryFormat(from) && to.CustomFormat == DateBoundaryFormat(to))) return;
+            CustomPeriod(); RefreshView();
+        }
+        private static string DateBoundaryFormat(DateTimePicker boundary)
+        {
+            return boundary.Checked ? "dd.MM.yyyy" : "'Без ограничения'";
+        }
+        private void UpdateDateFilterDisplay()
+        {
+            from.CustomFormat = DateBoundaryFormat(from);
+            to.CustomFormat = DateBoundaryFormat(to);
+        }
+        private bool IsDateColumn(string header)
+        {
+            var schema = Catalog.Get(current);
+            if (schema != null) return schema.Fields.Any(f => f.Type == "date" && f.Label == header);
+            if (current == "audit") return header == "Дата и время";
+            return current == "reports" && (header == "Дата" || header == "Срок" || header == "Срок / дата");
+        }
+        private static bool TryGridDate(object value, out DateTime date)
+        {
+            return DateTime.TryParseExact(Convert.ToString(value),
+                new[] { "dd.MM.yyyy", "dd.MM.yyyy HH:mm:ss '(Минск)'", "yyyy-MM-dd" },
+                CultureInfo.InvariantCulture, DateTimeStyles.None, out date);
+        }
+        private void CompareDates(object sender, DataGridViewSortCompareEventArgs e)
+        {
+            if (!Object.Equals(e.Column.Tag, "date")) return;
+            DateTime first, second;
+            bool hasFirst = TryGridDate(e.CellValue1, out first), hasSecond = TryGridDate(e.CellValue2, out second);
+            e.SortResult = hasFirst && hasSecond ? first.CompareTo(second)
+                : hasFirst != hasSecond ? hasFirst.CompareTo(hasSecond)
+                : String.Compare(Convert.ToString(e.CellValue1), Convert.ToString(e.CellValue2), StringComparison.CurrentCulture);
+            if (e.SortResult == 0)
+                e.SortResult = String.Compare(Convert.ToString(grid.Rows[e.RowIndex1].Tag), Convert.ToString(grid.Rows[e.RowIndex2].Tag), StringComparison.Ordinal);
+            e.Handled = true;
         }
         public void ResetFilters()
         {
@@ -594,6 +647,9 @@ namespace WorkLedger
         public void RefreshView()
         {
             if (refreshing || party.Items.Count == 0 || current == "create-act") return;
+            UpdateDateFilterDisplay();
+            string sortedDateHeader = grid.SortedColumn != null && Object.Equals(grid.SortedColumn.Tag, "date") ? grid.SortedColumn.HeaderText : null;
+            ListSortDirection dateSortDirection = grid.SortOrder == SortOrder.Descending ? ListSortDirection.Descending : ListSortDirection.Ascending;
             if (FilterAvailable("dates") && from.Checked && to.Checked && from.Value.Date > to.Value.Date)
             {
                 grid.Columns.Clear(); grid.Rows.Clear(); table = new TableData { Title = "Некорректный период" };
@@ -642,7 +698,11 @@ namespace WorkLedger
                 }
             }
             grid.Columns.Clear(); grid.Rows.Clear();
-            foreach (var h in table.Headers) grid.Columns.Add("c" + grid.Columns.Count, h);
+            foreach (var h in table.Headers)
+            {
+                int column = grid.Columns.Add("c" + grid.Columns.Count, h);
+                if (IsDateColumn(h)) grid.Columns[column].Tag = "date";
+            }
             int visible = 0;
             for (int i = 0; i < table.Rows.Count; i++)
             {
@@ -651,8 +711,14 @@ namespace WorkLedger
                 if (r != null && r.Kind == "act" && r.Get("status") == "signed" && store.ActDue(r.Id) > 0 && r.Get("dueDate") != "" && String.CompareOrdinal(r.Get("dueDate"), DateTime.Today.ToString("yyyy-MM-dd")) < 0) grid.Rows[n].DefaultCellStyle.ForeColor = Color.Firebrick;
                 if (r != null && r.Get("archived") == "true") grid.Rows[n].DefaultCellStyle.ForeColor = Color.Gray;
             }
+            if (sortedDateHeader != null)
+            {
+                var column = grid.Columns.Cast<DataGridViewColumn>().FirstOrDefault(c => c.HeaderText == sortedDateHeader && Object.Equals(c.Tag, "date"));
+                if (column != null) grid.Sort(column, dateSortDirection);
+            }
             count.Text = (visible == 0 ? "Нет записей по выбранным фильтрам. Нажмите «Сбросить», чтобы начать заново." : "Строк: " + visible)
-                + (FilterAvailable("currency") ? "    ·    " + (Curr == "Все валюты" ? Curr : "Валюта: " + Curr) : "");
+                + (FilterAvailable("currency") ? "    ·    " + (Curr == "Все валюты" ? Curr : "Валюта: " + Curr) : "")
+                + (FilterAvailable("dates") ? "    ·    " + PeriodText() : "");
             if (current == "work") hint.Text = "Период — по дате сметы. Поиск учитывает наименование работ, смету, контрагента и объект.";
             if (current == "audit") hint.Text = "Поиск по описанию, пользователю и разделу. Период — по местному времени Минска.";
             if (current == "reports" && search.Text.Trim() != "") hint.Text += " Поиск применяется до расчёта итогов.";
@@ -861,7 +927,7 @@ namespace WorkLedger
             if (composer == null) return;
             var draft = composer.BuildDraft();
             if (draft.Get("number") == "") draft.Set("number", store.NextActNumber + " (предпросмотр)");
-            string path = PrintPath(); HourlyActDocuments.WriteHtml(path, store, draft); Open(path);
+            string path = PrintPath(); ActHtmlDocument.WriteHtml(path, store, draft); Open(path);
         }
         private void ExportActDocument()
         {
@@ -875,7 +941,7 @@ namespace WorkLedger
         {
             var r = Selected(); if (r == null) return;
             string path = PrintPath();
-            if (r.Kind == "act" && (r.Get("workItems") != "" || r.Get("serviceGenerated") == "true")) { HourlyActDocuments.WriteHtml(path, store, r); Open(path); return; }
+            if (r.Kind == "act") { ActHtmlDocument.WriteHtml(path, store, r); Open(path); return; }
             var details = BuildDocumentDetails(r);
             var headers = new List<string>(); var rows = new List<List<string>>();
             if (r.Kind == "estimate")
@@ -883,10 +949,6 @@ namespace WorkLedger
                 headers.AddRange(new[] { "Работа", "Ед.", "Количество", "Цена", "Сумма" });
                 foreach (var w in store.Of("work").Where(w => w.Get("estimateId") == r.Id)) rows.Add(new[] { w.Get("description"), w.Get("unit"), w.Get("qty"), F(Num(w.Get("price"))), F(Money(w)) }.ToList());
                 details["Итого"] = F(store.EstimateTotal(r.Id)) + " " + r.Get("currency");
-            }
-            else if (r.Kind == "act")
-            {
-                headers.AddRange(new[] { "Описание выполненных работ", "Сумма", "Валюта" }); rows.Add(new[] { r.Get("description"), F(Money(r)), r.Get("currency") }.ToList());
             }
             PrintReport.WriteDocument(path, Catalog.Get(r.Kind).Singular + " № " + r.Get("number"), details, headers, rows, "Исполнитель ____________________    Заказчик ____________________\nПечатный шаблон: проверьте реквизиты и условия перед подписанием."); Open(path);
         }
@@ -975,8 +1037,10 @@ namespace WorkLedger
         }
         private string PeriodText()
         {
-            if (!FilterAvailable("dates")) return "За всё время";
-            return "Период: " + (from.Checked ? from.Value.ToString("dd.MM.yyyy") : "с начала учёта") + " — " + (to.Checked ? to.Value.ToString("dd.MM.yyyy") : "всё время");
+            if (!DateRangeActive) return "За всё время";
+            if (!from.Checked) return "По " + to.Value.ToString("dd.MM.yyyy");
+            if (!to.Checked) return "С " + from.Value.ToString("dd.MM.yyyy");
+            return "Период: " + from.Value.ToString("dd.MM.yyyy") + " — " + to.Value.ToString("dd.MM.yyyy");
         }
         public TableData BuildReport()
         {

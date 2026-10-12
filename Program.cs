@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -33,6 +33,7 @@ namespace WorkLedger
                     HourlyActDocumentTests.Run(Path.Combine(dataDir, "hourly-document-tests"));
                     ActItemsEditorTests.Run(Path.Combine(dataDir, "act-items-tests"));
                     ActDocumentTests.Run(Path.Combine(dataDir, "act-document-tests"));
+                    ActHtmlDocumentTests.Run(Path.Combine(dataDir, "act-html-tests"));
                     UiPreferencesTests.Run(Path.Combine(dataDir, "ui-preferences-tests"));
                     InterfaceUiTests.Run(Path.Combine(dataDir, "interface-ui-tests"));
                     UiStyleTests.Run();

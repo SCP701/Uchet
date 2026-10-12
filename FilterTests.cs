@@ -1,5 +1,7 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -199,8 +201,96 @@ namespace WorkLedger
                 period.SelectedIndex = choices[index]; Application.DoEvents();
                 Assert(from.Checked && to.Checked && from.Value.Date == starts[index] && to.Value.Date == ends[index], "wrong calendar period preset " + choices[index]);
             }
-            Range(form, today.AddDays(-3), today); Assert(period.SelectedIndex == 0, "manual boundary changes leave an inaccurate preset label");
+            Range(form, today.AddDays(-3), today); Assert(period.SelectedIndex == 5, "manual boundary changes leave an inaccurate preset label");
             Reset(form); Assert(period.SelectedIndex == 0 && !from.Checked && !to.Checked, "reset did not clear preset and both boundaries");
+        }
+        [DllImport("user32.dll")]
+        private static extern IntPtr SendMessage(IntPtr window, int message, IntPtr wParam, IntPtr lParam);
+        private static void ToggleBoundary(DateTimePicker picker)
+        {
+            IntPtr point = new IntPtr(8 | ((picker.Height / 2) << 16));
+            SendMessage(picker.Handle, 0x201, new IntPtr(1), point);
+            SendMessage(picker.Handle, 0x202, IntPtr.Zero, point);
+            Application.DoEvents();
+        }
+        private static void TestDateInteraction(MainForm form, Fixture f)
+        {
+            Navigate(form, "act"); Reset(form);
+            ComboBox period = Field<ComboBox>(form, "period");
+            DateTimePicker from = Field<DateTimePicker>(form, "from"), to = Field<DateTimePicker>(form, "to");
+            Assert(from.CustomFormat == "'Без ограничения'" && to.CustomFormat == "'Без ограничения'"
+                && Field<Label>(form, "count").Text.Contains("За всё время"), "unchecked date controls display an apparently active date");
+            from.Value = DateTime.Today.AddDays(1); Application.DoEvents();
+            Assert(from.Checked && !to.Checked && period.SelectedIndex == 5 && from.CustomFormat == "dd.MM.yyyy",
+                "selecting a date does not activate just its boundary or show the manual period");
+            Ids(form, "editing the lower date immediately filters the list", f.Draft);
+            Assert(Field<Label>(form, "count").Text.Contains("С " + from.Value.ToString("dd.MM.yyyy")), "start-only period is not shown below the grid");
+            Choose(form, "party", f.Customer.Id);
+            period.SelectedIndex = 0; Application.DoEvents();
+            Assert(!from.Checked && !to.Checked && ChoiceId(Field<ComboBox>(form, "party").SelectedItem) == f.Customer.Id,
+                "all-time preset clears other filters or leaves a date active");
+            Ids(form, "all-time preset restores records within the selected counterparty", f.Due, f.Overdue, f.Paid, f.Held, f.Draft, f.NoProject);
+            to.Value = DateTime.Today.AddDays(-1); Application.DoEvents();
+            Assert(!from.Checked && to.Checked && period.SelectedIndex == 5, "editing the upper date accidentally enables the lower boundary");
+            Ids(form, "editing the upper date immediately filters the list", f.Overdue);
+            ToggleBoundary(to);
+            Assert(!to.Checked && period.SelectedIndex == 0 && to.CustomFormat == "'Без ограничения'", "native checkbox removal does not update the date filter state (checked=" + to.Checked + ", preset=" + period.SelectedIndex + ", format=" + to.CustomFormat + ")");
+            Ids(form, "unchecking the final boundary immediately restores the list", f.Due, f.Overdue, f.Paid, f.Held, f.Draft, f.NoProject);
+            ToggleBoundary(from);
+            Assert(from.Checked && !to.Checked && period.SelectedIndex == 5, "native checkbox enabling does not update the manual period");
+            Ids(form, "checking a stored boundary immediately applies its date", f.Draft);
+            ToggleBoundary(from);
+            from.Focus();
+            SendMessage(from.Handle, 0x100, new IntPtr((int)Keys.Space), new IntPtr(1));
+            SendMessage(from.Handle, 0x102, new IntPtr((int)Keys.Space), new IntPtr(1));
+            SendMessage(from.Handle, 0x101, new IntPtr((int)Keys.Space), new IntPtr(1)); Application.DoEvents();
+            Assert(from.Checked && period.SelectedIndex == 5, "keyboard checkbox toggle does not update the boundary state (checked=" + from.Checked + ", preset=" + period.SelectedIndex + ")");
+            Ids(form, "keyboard checkbox applies the date immediately", f.Draft);
+            Reset(form);
+        }
+        private static void SortDates(MainForm form, string header, ListSortDirection direction, params Record[] expected)
+        {
+            DataGridView grid = Field<DataGridView>(form, "grid");
+            DataGridViewColumn column = grid.Columns.Cast<DataGridViewColumn>().Single(c => c.HeaderText == header);
+            grid.Sort(column, direction); Application.DoEvents();
+            Assert(VisibleIds(form).SequenceEqual(expected.Select(r => r.Id)), "incorrect chronological order for " + header + " / " + direction);
+            foreach (DataGridViewRow row in grid.Rows)
+            {
+                Record record = expected.Single(r => r.Id == Convert.ToString(row.Tag));
+                if (header == "Дата") Assert(Convert.ToString(row.Cells[column.Index].Value) == DateTime.ParseExact(record.Get("date"), "yyyy-MM-dd", CultureInfo.InvariantCulture).ToString("dd.MM.yyyy"),
+                    "date sorting detached row values from their record identity");
+            }
+        }
+        private static void TestDateSorting(string path)
+        {
+            Store store = new Store(path); Add(store, "settings", "currency", "BYN");
+            Record party = Add(store, "party", "name", "Проверка разных лет", "role", "client");
+            Record first = Act(store, party, null, "DATE-A", new DateTime(2025, 7, 1), "BYN", "income", "signed", "100");
+            Record second = Act(store, party, null, "DATE-B", new DateTime(2025, 12, 31), "BYN", "income", "signed", "200");
+            Record third = Act(store, party, null, "DATE-C", new DateTime(2026, 1, 1), "BYN", "income", "signed", "300");
+            Record fourth = Act(store, party, null, "DATE-D", new DateTime(2026, 4, 1), "BYN", "income", "signed", "400");
+            Record fifth = Act(store, party, null, "DATE-E", new DateTime(2026, 7, 14), "BYN", "income", "signed", "500");
+            Record[] acts = { first, second, third, fourth, fifth };
+            string[] deadlines = { "2026-01-01", "2025-12-31", "2026-04-01", "2026-07-14", "2025-07-01" };
+            for (int i = 0; i < acts.Length; i++) { Record edit = store.Find(acts[i].Id); edit.Set("dueDate", deadlines[i]); store.Upsert(edit); }
+            byte[] bytes = File.ReadAllBytes(store.DataPath); long revision = store.Revision;
+            using (MainForm form = new MainForm(store))
+            {
+                ShowHidden(form); Navigate(form, "act"); Reset(form);
+                SortDates(form, "Дата", ListSortDirection.Ascending, acts);
+                Range(form, new DateTime(2025, 12, 31), new DateTime(2026, 4, 1));
+                Assert(VisibleIds(form).SequenceEqual(new[] { second.Id, third.Id, fourth.Id }), "filtering drops the chosen date ordering or excludes range edges");
+                SortDates(form, "Дата", ListSortDirection.Descending, fourth, third, second);
+                Field<ComboBox>(form, "period").SelectedIndex = 0; Application.DoEvents();
+                Assert(VisibleIds(form).SequenceEqual(acts.Reverse().Select(r => r.Id)), "clearing dates drops descending date ordering");
+                SortDates(form, "Срок оплаты", ListSortDirection.Ascending, fifth, second, first, third, fourth);
+                SortDates(form, "Срок оплаты", ListSortDirection.Descending, fourth, third, first, second, fifth);
+                form.SelectReport(0); Reset(form);
+                SortDates(form, "Дата", ListSortDirection.Ascending, acts);
+                SortDates(form, "Срок", ListSortDirection.Ascending, fifth, second, first, third, fourth);
+                Assert(store.Revision == revision && bytes.SequenceEqual(File.ReadAllBytes(store.DataPath)), "date filtering or sorting changed the saved ledger");
+                form.Close();
+            }
         }
         private static void TestInheritedFiltersAndExpense(MainForm form, Fixture f)
         {
@@ -358,15 +448,16 @@ namespace WorkLedger
             {
                 ShowHidden(form);
                 TestCombinedAndFinancialStatus(form, fixture); TestSearch(form, fixture); TestDateLimits(form, fixture);
-                TestPresets(form); TestInheritedFiltersAndExpense(form, fixture); TestInactiveAndReset(form, fixture);
+                TestPresets(form); TestDateInteraction(form, fixture); TestInheritedFiltersAndExpense(form, fixture); TestInactiveAndReset(form, fixture);
                 Assert(store.Revision == revision && store.Audit.Count == audits && bytes.SequenceEqual(File.ReadAllBytes(store.DataPath)),
                     "changing filters, navigation or reset mutated the ledger or audit history");
                 form.Close();
             }
+            TestDateSorting(Path.Combine(root, "date-sorting"));
             TestReports(Path.Combine(root, "reports"));
             TestCreationDefaultsAndComputedSearch(Path.Combine(root, "draft-defaults"));
             File.WriteAllText(Path.Combine(root, "PASS.txt"),
-                "PASS: combined counterparty/object/currency/status filters; archive references; AND search including hidden fields and е/ё; inclusive/one-sided/recoverable date ranges; calendar presets; inherited work dates and linked dimensions; expense direction and supplier identity; inactive filters; reset; filtered cash and reconciliation totals; archived financial contributions; ledger isolation.", Encoding.UTF8);
+                "PASS: combined counterparty/object/currency/status filters; archive references; AND search including hidden fields and е/ё; inclusive/one-sided/recoverable date ranges; native date checkbox interaction and clear inactive state; all-time/calendar presets; chronological date/deadline sorting retained after filtering; inherited work dates and linked dimensions; expense direction and supplier identity; inactive filters; reset; filtered cash and reconciliation totals; archived financial contributions; ledger isolation.", Encoding.UTF8);
         }
     }
 }
