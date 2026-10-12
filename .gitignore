@@ -1,0 +1,24 @@
+# Private signing keys and certificates
+.release-signing-key.xml
+*.pfx
+*.p12
+
+# Compiled files and generated test data
+dist/
+.verification/
+.*-verification/
+.uverify/
+test-data/
+*.dll
+*.user
+__pycache__/
+*.py[cod]
+
+# Local data and document previews
+template-work/
+output-documents/
+distribution/
+*.db
+*.sqlite
+*.sqlite3
+preview.ps1
