@@ -1,0 +1,96 @@
+name: Publish signed Windows release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'release-assets/**'
+      - '.github/workflows/publish-release.yml'
+      - 'verify_release.py'
+      - 'update-public-key.pem'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-signed-release-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.repository == 'SCP701/Uchet' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Read the prepared release
+        # Official actions/checkout v7.0.1, pinned to its verified release commit.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Verify signature and every packaged file
+        id: verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v openssl
+          command -v python3
+          command -v gh
+          python3 verify_release.py \
+            --assets-dir release-assets \
+            --key update-public-key.pem \
+            --report "$RUNNER_TEMP/verified-release.json" \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Publish a new release or verify the unchanged existing release
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.verify.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.verify.outputs.display_version }}
+          HAS_BOOTSTRAP: ${{ steps.verify.outputs.has_bootstrap }}
+        run: |
+          set -euo pipefail
+          tag="$RELEASE_TAG"
+          info="$RUNNER_TEMP/github-release.json"
+          assets=(release-assets/AktiOplaty-update.zip release-assets/update-manifest.json release-assets/update-manifest.sig)
+          if [[ "$HAS_BOOTSTRAP" == "true" ]]; then
+            assets+=(release-assets/AktiOplaty-Windows.zip)
+          fi
+          if gh release view "$tag" --repo "$GH_REPO" \
+            --json tagName,isDraft,isPrerelease,assets > "$info" 2> "$RUNNER_TEMP/release-lookup-error.txt"; then
+            # An existing release is never edited and no assets are replaced.
+            python3 verify_release.py --assets-dir release-assets --key update-public-key.pem --release-info "$info"
+            existing_dir="$(mktemp -d "$RUNNER_TEMP/existing-release.XXXXXX")"
+            gh release download "$tag" --repo "$GH_REPO" --dir "$existing_dir"
+            python3 verify_release.py --assets-dir "$existing_dir" --key update-public-key.pem \
+              --release-info "$info" --compare-with release-assets
+            printf '%s\n' "Release $tag already contains exactly these verified files; no changes were made."
+          else
+            if ! grep -qiE 'release not found|HTTP 404|Not Found' "$RUNNER_TEMP/release-lookup-error.txt"; then
+              cat "$RUNNER_TEMP/release-lookup-error.txt" >&2
+              exit 1
+            fi
+            cat > "$RUNNER_TEMP/release-notes.txt" <<'NOTES'
+          Приложение для Windows: учёт актов, договоров, смет, оплат, расходов и задолженности на одном компьютере.
+
+          Для первого запуска скачайте AktiOplaty-Windows.zip, распакуйте архив и запустите AktiOplaty.exe. Оставьте Updater.exe рядом.
+
+          В установленном приложении откройте «Обновления» → «Проверить обновления». Подпись и контрольные суммы проверяются перед установкой; рабочая база хранится отдельно.
+          NOTES
+            gh release create "$tag" "${assets[@]}" --repo "$GH_REPO" \
+              --target "$GITHUB_SHA" --title "Акты и оплаты $RELEASE_VERSION" \
+              --notes-file "$RUNNER_TEMP/release-notes.txt" --latest
+            gh release view "$tag" --repo "$GH_REPO" --json tagName,isDraft,isPrerelease,assets > "$info"
+            published_dir="$(mktemp -d "$RUNNER_TEMP/published-release.XXXXXX")"
+            gh release download "$tag" --repo "$GH_REPO" --dir "$published_dir"
+            python3 verify_release.py --assets-dir "$published_dir" --key update-public-key.pem \
+              --release-info "$info" --compare-with release-assets
+            printf '%s\n' "Published and verified $tag."
+          fi
