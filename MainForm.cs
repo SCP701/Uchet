@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -21,11 +21,18 @@ namespace WorkLedger
     public sealed class MainForm : Form
     {
         private Store store;
+        private readonly bool automationEnabled;
+        private readonly System.Windows.Forms.Timer monthlyTimer = new System.Windows.Forms.Timer();
+        private readonly Label monthlyNotice = new Label();
+        private string lastAutomationError;
         private Panel body = new Panel();
         private FlowLayoutPanel nav = new FlowLayoutPanel(), actions = new FlowLayoutPanel();
         private Label title = new Label(), hint = new Label(), count = new Label();
         private DataGridView grid = new DataGridView();
         private TextBox search = new TextBox();
+        private ComboBox project = new ComboBox(), status = new ComboBox(), period = new ComboBox();
+        private System.Windows.Forms.Button resetFiltersButton;
+        private readonly ToolTip filterTips = new ToolTip();
         private ComboBox currency = new ComboBox(), party = new ComboBox(), direction = new ComboBox(), report = new ComboBox();
         private DateTimePicker from = new DateTimePicker(), to = new DateTimePicker();
         private CheckBox archived = new CheckBox();
@@ -39,9 +46,10 @@ namespace WorkLedger
         private bool refreshing;
         private TableData table = new TableData();
         private static readonly Color Ink = UiStyle.Ink, Accent = UiStyle.Accent, Background = UiStyle.Background;
-        public MainForm(Store data)
+        public MainForm(Store data) : this(data, false) { }
+        public MainForm(Store data, bool runAutomation)
         {
-            store = data;
+            store = data; automationEnabled = runAutomation;
             if (!File.Exists(store.DataPath)) { var settings = new Record("settings"); settings.Set("currency", "BYN"); store.Upsert(settings); }
             interfacePreferences = UiPreferences.Load(store.DataDir);
             Text = "Акты и оплаты — учёт работ"; Width = 1460; Height = 900; MinimumSize = new Size(1120, 680);
@@ -90,27 +98,35 @@ namespace WorkLedger
             actions.Padding = new Padding(0, 0, 0, 7);
             filters = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = true, Padding = new Padding(10, 8, 10, 4), BackColor = Color.White, Margin = new Padding(0) };
             filters.Paint += delegate(object sender, PaintEventArgs e) { using (var pen = new Pen(UiStyle.Border)) e.Graphics.DrawRectangle(pen, 0, 0, filters.ClientSize.Width - 1, filters.ClientSize.Height - 1); };
-            search.Width = 175; search.TextChanged += delegate { RefreshView(); }; search.AccessibleName = "Поиск";
+            search.Width = 225; search.TextChanged += delegate { RefreshView(); }; search.AccessibleName = "Поиск";
             currency.Width = 112; currency.DropDownStyle = ComboBoxStyle.DropDownList; currency.Items.AddRange(new object[] { "BYN", "RUB", "USD", "EUR", "Все валюты" });
             currency.SelectedItem = (store.Of("settings").FirstOrDefault() ?? new Record("settings")).Get("currency"); if (currency.SelectedIndex < 0) currency.SelectedIndex = 0;
             party.Width = 200; party.DropDownStyle = ComboBoxStyle.DropDownList; party.AccessibleName = "Фильтр контрагентов";
             direction.Width = 150; direction.DropDownStyle = ComboBoxStyle.DropDownList; direction.Items.AddRange(new object[] { "Оба направления", "Нам платят", "Мы платим" }); direction.SelectedIndex = 0;
             from.Width = to.Width = 132; from.Format = to.Format = DateTimePickerFormat.Custom; from.CustomFormat = to.CustomFormat = "dd.MM.yyyy"; from.ShowCheckBox = to.ShowCheckBox = true;
             from.Value = new DateTime(DateTime.Today.Year, 1, 1); to.Value = DateTime.Today; from.Checked = to.Checked = false;
-            archived.Text = "Архив"; archived.AutoSize = true; archived.Margin = new Padding(6, 6, 0, 0);
+            project.Width = 200; project.DropDownStyle = ComboBoxStyle.DropDownList; project.AccessibleName = "Фильтр объектов";
+            status.Width = 185; status.DropDownStyle = ComboBoxStyle.DropDownList; status.AccessibleName = "Состояние записи";
+            period.Width = 165; period.DropDownStyle = ComboBoxStyle.DropDownList; period.AccessibleName = "Быстрый период";
+            period.Items.AddRange(new object[] { "Произвольный", "Сегодня", "Этот месяц", "Прошлый месяц", "Этот год" }); period.SelectedIndex = 0;
+            currency.AccessibleName = "Фильтр валюты"; direction.AccessibleName = "Направление расчётов";
+            from.AccessibleName = "Начало периода"; to.AccessibleName = "Конец периода";
+            archived.Text = "Показывать архив"; archived.AutoSize = true; archived.Tag = "filter:archive"; archived.Margin = new Padding(6, 6, 0, 0);
+            filterTips.SetToolTip(search, "Все слова запроса ищутся в записи, примечаниях и связанных документах. Регистр и ё/е не важны.");
+            filterTips.SetToolTip(from, "Включите галочку, чтобы ограничить дату снизу. Указанный день входит в период.");
+            filterTips.SetToolTip(to, "Включите галочку, чтобы ограничить дату сверху. Указанный день входит в период.");
+            filterTips.SetToolTip(archived, "Показывает действующие и архивные записи. Архив не исключается из финансовых отчётов.");
             AddFilter(filters, "Поиск", search, "search"); AddFilter(filters, "Валюта", currency, "currency");
-            AddFilter(filters, "Контрагент", party, "party"); AddFilter(filters, "", direction, "direction");
-            AddFilter(filters, "С", from, "dates"); AddFilter(filters, "По", to, "dates"); filters.Controls.Add(archived);
-            foreach (var combo in new[] { currency, party, direction }) combo.SelectedIndexChanged += delegate
-            {
-                if (!refreshing && Curr == "Все валюты" && current != "act")
-                { currency.SelectedItem = BaseCurrency; return; }
-                RefreshView();
-            };
-            from.ValueChanged += delegate { RefreshView(); }; to.ValueChanged += delegate { RefreshView(); }; archived.CheckedChanged += delegate { RefreshView(); };
+            AddFilter(filters, "Контрагент", party, "party"); AddFilter(filters, "Объект", project, "project");
+            AddFilter(filters, "Направление", direction, "direction"); AddFilter(filters, "Состояние", status, "status");
+            AddFilter(filters, "Период", period, "dates"); AddFilter(filters, "С", from, "dates"); AddFilter(filters, "По", to, "dates"); filters.Controls.Add(archived);
+            resetFiltersButton = Button("Сбросить", ResetFilters); resetFiltersButton.Tag = "filter:reset"; resetFiltersButton.AccessibleName = "Сбросить фильтры"; filters.Controls.Add(resetFiltersButton);
+            foreach (var combo in new[] { currency, party, project, direction, status }) combo.SelectedIndexChanged += delegate { RefreshView(); };
+            period.SelectedIndexChanged += delegate { ApplyPeriod(); };
+            from.ValueChanged += delegate { CustomPeriod(); RefreshView(); }; to.ValueChanged += delegate { CustomPeriod(); RefreshView(); }; archived.CheckedChanged += delegate { RefreshView(); };
             report.Width = 285; report.DropDownStyle = ComboBoxStyle.DropDownList;
             report.Items.AddRange(new object[] { "Задолженность по актам", "Прибыль по объектам", "Сверка с контрагентом", "Выполнение договоров", "Движение денег", "Документы и сроки" });
-            report.SelectedIndex = 0; report.SelectedIndexChanged += delegate { RefreshView(); };
+            report.SelectedIndex = 0; report.SelectedIndexChanged += delegate { ConfigureFilters(false); RefreshView(); };
             grid.Dock = DockStyle.Fill; grid.ReadOnly = true; grid.AllowUserToAddRows = false; grid.AllowUserToDeleteRows = false;
             grid.RowHeadersVisible = false; grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect; grid.MultiSelect = false;
             grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.DisplayedCells; UiStyle.ApplyGrid(grid);
@@ -119,8 +135,22 @@ namespace WorkLedger
             count.Dock = DockStyle.Bottom; count.Height = 27; count.AutoEllipsis = true; count.ForeColor = UiStyle.Muted; count.Font = new Font("Segoe UI", 9);
             body.Controls.Add(grid); body.Controls.Add(overview); body.Controls.Add(count); body.Controls.Add(filters); body.Controls.Add(actions); body.Controls.Add(header);
             UiStyle.ApplyTo(this); UiStyle.SetAnimations(this, interfacePreferences.AnimationsEnabled);
+            monthlyNotice.Dock = DockStyle.Bottom; monthlyNotice.Height = 36; monthlyNotice.AutoEllipsis = true;
+            monthlyNotice.Padding = new Padding(0, 6, 0, 0); monthlyNotice.Font = new Font("Segoe UI", 9); monthlyNotice.Visible = false;
+            monthlyNotice.Click += delegate { if (monthlyNotice.Cursor == Cursors.Hand) ShowAllActs(); };
+            body.Controls.Add(monthlyNotice);
             RefillParties(); ApplyInterfacePreferences(interfacePreferences);
             Navigate(FirstVisibleSection());
+            if (automationEnabled)
+            {
+                Shown += delegate { RefreshMonthlyServiceAutomation(); monthlyTimer.Start(); };
+                monthlyTimer.Interval = 60000;
+                monthlyTimer.Tick += delegate
+                {
+                    try { ProcessMonthlyServiceActs(MonthlyServiceRuntime.Today); lastAutomationError = null; }
+                    catch (Exception e) { ShowMonthlyServiceError(e.Message); }
+                };
+            }
             overview.SizeChanged += delegate { if (current == "overview" && IsHandleCreated && !refreshing) RefreshView(); };
         }
         private string BaseCurrency { get { var setting = store.Of("settings").FirstOrDefault(); return setting == null || setting.Get("currency") == "" ? "BYN" : setting.Get("currency"); } }
@@ -129,6 +159,47 @@ namespace WorkLedger
             var group = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false, Margin = new Padding(0, 0, 9, 7), Tag = "filter:" + tag };
             if (label != "") group.Controls.Add(new Label { Text = label, AutoSize = true, ForeColor = UiStyle.Muted, Font = new Font("Segoe UI", 9), Margin = new Padding(0, 6, 6, 0) });
             input.Margin = new Padding(0); group.Controls.Add(input); parent.Controls.Add(group);
+        }
+
+
+        public int ProcessMonthlyServiceActs(DateTime today)
+        {
+            viewTransition.Cancel();
+            var created = store.GenerateMonthlyServiceActs(today);
+            if (created.Count > 0)
+            {
+                RefreshView();
+                monthlyNotice.ForeColor = UiStyle.Blue; monthlyNotice.Cursor = Cursors.Hand;
+                monthlyNotice.Text = "Обслуживание: создано актов " + created.Count + ". Нажмите, чтобы открыть все акты.";
+                monthlyNotice.Visible = true;
+                MonthlyServiceRuntime.Log(store.DataDir, "Создано актов обслуживания: " + created.Count);
+            }
+            return created.Count;
+        }
+        private void RefreshMonthlyServiceAutomation()
+        {
+            if (!automationEnabled) return;
+            try
+            {
+                ProcessMonthlyServiceActs(MonthlyServiceRuntime.Today);
+                bool enabled = store.Of("party").Any(p => p.Get("monthlyServiceEnabled") == "true");
+                var result = MonthlyServiceScheduler.Ensure(Application.ExecutablePath, store.DataDir, enabled);
+                if (!result.Success && enabled)
+                {
+                    monthlyNotice.Text = "Фоновое создание не настроено. При открытой программе акты создаются автоматически. " + result.Message;
+                    monthlyNotice.ForeColor = Color.Firebrick; monthlyNotice.Cursor = Cursors.Default; monthlyNotice.Visible = true;
+                    MonthlyServiceRuntime.Log(store.DataDir, result.Message + " " + result.ErrorDetails);
+                }
+                else if (!enabled || (result.Success && monthlyNotice.ForeColor == Color.Firebrick)) monthlyNotice.Visible = false;
+            }
+            catch (Exception e) { ShowMonthlyServiceError(e.Message); }
+        }
+        private void ShowMonthlyServiceError(string message)
+        {
+            monthlyNotice.Text = "Не удалось создать акты обслуживания: " + message;
+            monthlyNotice.ForeColor = Color.Firebrick; monthlyNotice.Cursor = Cursors.Default; monthlyNotice.Visible = true;
+            if (message != lastAutomationError) MonthlyServiceRuntime.Log(store.DataDir, message);
+            lastAutomationError = message;
         }
 
 
@@ -218,7 +289,7 @@ namespace WorkLedger
         }
         protected override void Dispose(bool disposing)
         {
-            if (disposing) viewTransition.Dispose();
+            if (disposing) { monthlyTimer.Stop(); monthlyTimer.Dispose(); filterTips.Dispose(); viewTransition.Dispose(); }
             base.Dispose(disposing);
         }
 
@@ -227,20 +298,130 @@ namespace WorkLedger
             try { action(); }
             catch (Exception ex) { MessageBox.Show(this, ex.Message, "Не удалось выполнить действие", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
         }
+        private static string ChoiceId(ComboBox box) { var selected = box.SelectedItem as Choice; return selected == null ? "" : selected.Id; }
+        private static void SelectChoice(ComboBox box, string id)
+        {
+            box.SelectedIndex = box.Items.Count == 0 ? -1 : 0;
+            for (int index = 0; index < box.Items.Count; index++) if (((Choice)box.Items[index]).Id == id) { box.SelectedIndex = index; break; }
+        }
         private void RefillParties()
         {
-            string selected = party.SelectedItem is Choice ? ((Choice)party.SelectedItem).Id : "";
-            refreshing = true; party.Items.Clear(); party.Items.Add(new Choice("", "Все контрагенты"));
-            foreach (var r in store.Of("party").OrderBy(x => x.Get("name"))) party.Items.Add(new Choice(r.Id, r.Get("name")));
-            party.SelectedIndex = 0;
-            for (int i = 0; i < party.Items.Count; i++) if (((Choice)party.Items[i]).Id == selected) party.SelectedIndex = i;
-            refreshing = false;
+            string selectedParty = ChoiceId(party), selectedProject = ChoiceId(project);
+            bool previous = refreshing; refreshing = true;
+            try
+            {
+                party.Items.Clear(); party.Items.Add(new Choice("", "Все контрагенты"));
+                foreach (var record in store.Records.Where(r => r.Kind == "party").OrderBy(r => r.Get("name")))
+                    party.Items.Add(new Choice(record.Id, Catalog.Display(store, record)));
+                SelectChoice(party, selectedParty);
+                project.Items.Clear(); project.Items.Add(new Choice("", "Все объекты")); project.Items.Add(new Choice("__none__", "Без объекта"));
+                foreach (var record in store.Records.Where(r => r.Kind == "project").OrderBy(r => r.Get("name")))
+                    project.Items.Add(new Choice(record.Id, Catalog.Display(store, record)));
+                SelectChoice(project, selectedProject);
+            }
+            finally { refreshing = previous; }
+        }
+        private bool FilterAvailable(string key)
+        {
+            if (current == "create-act") return false;
+            if (current == "overview") return key == "currency";
+            if (current == "audit") return key == "search" || key == "dates" || key == "reset";
+            if (key == "search" || key == "reset") return true;
+            if (key == "archive") return current != "reports";
+            if (key == "currency" || key == "project" || key == "party") return current != "party";
+            if (key == "direction") return current != "party" && current != "project" && !(current == "reports" && report.SelectedIndex == 1);
+            if (key == "dates") return current != "party" && current != "project";
+            if (key == "status")
+            {
+                var schema = Catalog.Get(current);
+                return current == "payment" || (schema != null && schema.Fields.Any(f => f.Key == "status" || f.Key == "role"));
+            }
+            return false;
+        }
+        private void ConfigureFilters(bool refillStatus)
+        {
+            bool previous = refreshing; refreshing = true;
+            try
+            {
+                bool allCurrencies = current != "overview" && current != "reports" && current != "project";
+                if (allCurrencies && !currency.Items.Contains("Все валюты")) currency.Items.Add("Все валюты");
+                if (!allCurrencies)
+                {
+                    if (Curr == "Все валюты") currency.SelectedItem = BaseCurrency;
+                    currency.Items.Remove("Все валюты");
+                }
+                if (refillStatus)
+                {
+                    status.Items.Clear(); status.Items.Add(new Choice("", current == "party" ? "Все роли" : "Все состояния"));
+                    var schema = Catalog.Get(current);
+                    var field = schema == null ? null : schema.Fields.FirstOrDefault(f => f.Key == "status" || f.Key == "role");
+                    if (field != null) foreach (var option in field.Options) status.Items.Add(new Choice(option.Key, option.Value));
+                    if (current == "act")
+                    {
+                        status.Items.Add(new Choice("due", "Есть долг к оплате")); status.Items.Add(new Choice("overdue", "Просроченные"));
+                        status.Items.Add(new Choice("paid", "Оплаченные")); status.Items.Add(new Choice("held", "Только удержания"));
+                    }
+                    if (current == "payment") { status.Items.Add(new Choice("advance", "Есть незачтённый аванс")); status.Items.Add(new Choice("allocated", "Полностью зачтены")); }
+                    status.SelectedIndex = 0;
+                }
+                foreach (Control group in filters.Controls)
+                {
+                    string tag = Convert.ToString(group.Tag);
+                    bool available = tag.StartsWith("filter:", StringComparison.Ordinal) && FilterAvailable(tag.Substring(7));
+                    group.Visible = group.Enabled = available;
+                }
+                search.Enabled = FilterAvailable("search"); currency.Enabled = FilterAvailable("currency");
+                party.Enabled = FilterAvailable("party"); project.Enabled = FilterAvailable("project");
+                direction.Enabled = FilterAvailable("direction"); status.Enabled = FilterAvailable("status");
+                from.Enabled = to.Enabled = period.Enabled = FilterAvailable("dates"); archived.Enabled = FilterAvailable("archive");
+                resetFiltersButton.Enabled = FilterAvailable("reset");
+            }
+            finally { refreshing = previous; }
+        }
+        private bool DateRangeActive { get { return FilterAvailable("dates") && (from.Checked || to.Checked); } }
+        private bool InPeriod(DateTime date) { return !DateRangeActive || ((!from.Checked || date.Date >= from.Value.Date) && (!to.Checked || date.Date <= to.Value.Date)); }
+        private void CustomPeriod()
+        {
+            if (refreshing || period.SelectedIndex == 0) return;
+            bool previous = refreshing; refreshing = true; period.SelectedIndex = 0; refreshing = previous;
+        }
+        private void ApplyPeriod()
+        {
+            if (refreshing || period.SelectedIndex <= 0) return;
+            bool previous = refreshing; refreshing = true;
+            try
+            {
+                DateTime today = DateTime.Today, begin = today, end = today;
+                if (period.SelectedIndex == 2) { begin = new DateTime(today.Year, today.Month, 1); end = begin.AddMonths(1).AddDays(-1); }
+                else if (period.SelectedIndex == 3) { end = new DateTime(today.Year, today.Month, 1).AddDays(-1); begin = new DateTime(end.Year, end.Month, 1); }
+                else if (period.SelectedIndex == 4) { begin = new DateTime(today.Year, 1, 1); end = new DateTime(today.Year, 12, 31); }
+                from.Value = begin; to.Value = end; from.Checked = to.Checked = true;
+            }
+            finally { refreshing = previous; }
+            RefreshView();
+        }
+        public void ResetFilters()
+        {
+            bool previous = refreshing; refreshing = true;
+            try
+            {
+                search.Clear(); SelectChoice(party, ""); SelectChoice(project, ""); SelectChoice(status, "");
+                direction.SelectedIndex = 0; from.Checked = to.Checked = false; period.SelectedIndex = 0; archived.Checked = false;
+                currency.SelectedItem = BaseCurrency; if (currency.SelectedIndex < 0) currency.SelectedIndex = 0;
+            }
+            finally { refreshing = previous; }
+            RefreshView();
+        }
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            if (keyData == (Keys.Control | Keys.F) && FilterAvailable("search")) { search.Focus(); search.SelectAll(); return true; }
+            if (keyData == (Keys.Control | Keys.Shift | Keys.R) && FilterAvailable("reset")) { ResetFilters(); return true; }
+            return base.ProcessCmdKey(ref msg, keyData);
         }
         public void Navigate(string kind)
         {
             string previous = current; viewTransition.Cancel(); current = kind;
-            if (kind != "act" && Curr == "Все валюты")
-                currency.SelectedItem = (store.Of("settings").FirstOrDefault() ?? new Record("settings")).Get("currency") == "" ? "BYN" : store.Of("settings").First().Get("currency");
+            ConfigureFilters(true);
             foreach (var button in nav.Controls.OfType<UiButton>()) button.Selected = Convert.ToString(button.Tag) == kind;
             foreach (Control action in actions.Controls.Cast<Control>().ToList())
                 if (Object.ReferenceEquals(action, report)) actions.Controls.Remove(action); else action.Dispose();
@@ -299,31 +480,103 @@ namespace WorkLedger
             overview.Visible = kind == "overview"; grid.Visible = kind != "overview" && kind != "create-act";
             if (composer != null) composer.Visible = kind == "create-act";
             filters.Visible = count.Visible = kind != "create-act";
-            foreach (Control filter in filters.Controls)
-                filter.Visible = kind != "overview" || Convert.ToString(filter.Tag) == "filter:currency";
-            search.Enabled = kind != "overview"; party.Enabled = kind != "overview"; direction.Enabled = kind != "overview"; archived.Enabled = Catalog.Get(kind) != null;
-            from.Enabled = to.Enabled = kind != "overview" && kind != "audit";
+            ConfigureFilters(false);
             RefreshView();
             if (previous != kind) viewTransition.Begin(kind == "create-act" ? (Control)composer : kind == "overview" ? (Control)overview : grid, interfacePreferences.AnimationsEnabled);
         }
         private string Curr { get { return Convert.ToString(currency.SelectedItem); } }
-        private string PartyId { get { if (current == "overview") return ""; return party.SelectedItem is Choice ? ((Choice)party.SelectedItem).Id : ""; } }
-        private string Dir { get { if (current == "overview") return ""; return direction.SelectedIndex == 1 ? "income" : direction.SelectedIndex == 2 ? "expense" : ""; } }
+        private string PartyId { get { return FilterAvailable("party") ? ChoiceId(party) : ""; } }
+        private string ProjectId { get { return FilterAvailable("project") ? ChoiceId(project) : ""; } }
+        private string Dir { get { if (!FilterAvailable("direction")) return ""; return direction.SelectedIndex == 1 ? "income" : direction.SelectedIndex == 2 ? "expense" : ""; } }
         private bool Match(Record r, bool dateFilter)
         {
             r = Effective(r);
-            if (Curr != "Все валюты" && r.Get("currency") != "" && r.Get("currency") != Curr) return false;
+            if (FilterAvailable("currency") && Curr != "Все валюты" && r.Get("currency") != "" && r.Get("currency") != Curr) return false;
+            if (!MatchesProject(r)) return false;
             if (PartyId != "" && r.Kind != "party" && r.Get("partyId") != PartyId) return false;
             if (r.Kind == "party" && PartyId != "" && r.Id != PartyId) return false;
-            if (Dir != "" && r.Get("direction") != "" && r.Get("direction") != Dir) return false;
+            if (Dir != "" && r.Get("direction") != Dir) return false;
+            if (FilterAvailable("status") && !MatchesStatus(r)) return false;
             DateTime d;
-            if (dateFilter && DateTime.TryParseExact(r.Get("date"), "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out d))
-            { if (from.Checked && d.Date < from.Value.Date) return false; if (to.Checked && d.Date > to.Value.Date) return false; }
+            if (dateFilter && DateRangeActive && (!DateTime.TryParseExact(r.Get("date"), "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out d) || !InPeriod(d))) return false;
             return true;
+        }
+        private bool MatchesProject(Record r)
+        {
+            string selected = ProjectId, actual = r.Kind == "project" ? r.Id : r.Get("projectId");
+            return selected == "" || (selected == "__none__" ? actual == "" : actual == selected);
+        }
+        private bool MatchesStatus(Record r)
+        {
+            string selected = ChoiceId(status);
+            if (selected == "") return true;
+            if (r.Kind == "party") return r.Get("role") == selected;
+            if (r.Kind == "payment") return selected == "advance" ? store.PaymentUnallocated(r.Id) > 0 : store.PaymentUnallocated(r.Id) == 0;
+            if (r.Kind == "act")
+            {
+                if (selected == "due") return r.Get("status") == "signed" && store.ActDue(r.Id) > 0;
+                if (selected == "overdue") return r.Get("status") == "signed" && store.ActDue(r.Id) > 0 && r.Get("dueDate") != "" && String.CompareOrdinal(r.Get("dueDate"), Store.DateString(DateTime.Today)) < 0;
+                if (selected == "paid") return r.Get("status") == "signed" && store.ActGrossDue(r.Id) == 0;
+                if (selected == "held") return r.Get("status") == "signed" && store.ActGrossDue(r.Id) > 0 && store.ActDue(r.Id) == 0;
+            }
+            return r.Get("status") == selected;
+        }
+        private IEnumerable<string> SearchValues(Record record)
+        {
+            var r = Effective(record); var schema = Catalog.Get(r.Kind);
+            if (schema != null) foreach (var field in schema.Fields.Where(f => f.Key != "filePath"))
+                yield return Value(r, field);
+            yield return Catalog.Display(store, r);
+            foreach (string link in new[] { "partyId", "projectId", "contractId", "estimateId", "actId" })
+            {
+                var related = store.Find(r.Get(link)); if (related == null) continue;
+                yield return Catalog.Display(store, related);
+                yield return related.Get("name"); yield return related.Get("unp"); yield return related.Get("title"); yield return related.Get("description");
+            }
+            if (r.Get("amount") != "") yield return F(Money(r));
+            if (r.Get("direction") == "income") yield return "Нам платят Поступление";
+            if (r.Get("direction") == "expense") yield return "Мы платим Выплата";
+            if (r.Kind == "act")
+            {
+                yield return Status(r); yield return F(store.AllocatedToAct(r.Id)); yield return F(store.ActGrossDue(r.Id));
+                yield return F(store.ActiveHolds(r.Id)); yield return F(store.ActDue(r.Id));
+                if (r.Get("status") == "sent") yield return "Получить подпись";
+                if (r.Get("status") == "draft") yield return "Подготовить и отправить";
+            }
+            if (r.Kind == "payment") { yield return F(store.AllocatedFromPayment(r.Id)); yield return F(store.PaymentUnallocated(r.Id)); }
+            if (r.Kind == "estimate") yield return F(store.EstimateTotal(r.Id));
+            if (r.Kind == "contract")
+            {
+                decimal effectiveAmount = store.EffectiveContractAmount(r.Id), completed = store.ContractActTotal(r.Id);
+                yield return F(effectiveAmount); yield return F(completed); yield return F(effectiveAmount - completed);
+                yield return "Проверить срок договора";
+            }
+            if (r.Kind == "invoice") { var act = store.Find(r.Get("actId")); if (act != null) yield return Status(act); yield return "Выставить счёт"; }
+            if (r.Kind == "document") yield return r.Get("status") == "missing" ? "Добавить недостающий документ" : r.Get("status") == "sent" ? "Получить подпись" : "Отправить подписать";
+            if (r.Kind == "project")
+            {
+                var totals = ProjectTotals(r.Id, current == "reports");
+                yield return F(totals[0]); yield return F(totals[1]); yield return F(totals[0] - totals[1]);
+                if (current == "reports" && report.SelectedIndex == 1)
+                {
+                    yield return F(ProjectRecords("act", true).Where(a => a.Get("projectId") == r.Id && a.Get("status") == "signed" && a.Get("direction") == "expense").Sum(a => Money(a)));
+                    yield return F(ProjectRecords("expense", true).Where(e => e.Get("projectId") == r.Id).Sum(e => Money(e)));
+                    var payments = ProjectRecords("payment", true).Where(pay => pay.Get("projectId") == r.Id).ToList();
+                    yield return F(payments.Where(pay => pay.Get("direction") == "income").Sum(pay => Money(pay)));
+                    yield return F(payments.Where(pay => pay.Get("direction") == "expense").Sum(pay => Money(pay)));
+                }
+            }
+        }
+        private bool MatchesSearch(Record r) { return !FilterAvailable("search") || FilterText.Matches(SearchValues(r), search.Text); }
+        private bool AuditInPeriod(string utc)
+        {
+            DateTime date;
+            return !DateRangeActive || (DateTime.TryParse(utc, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out date) && InPeriod(date.ToUniversalTime().AddHours(3)));
         }
         private string Value(Record r, FieldDef f)
         {
             var value = Effective(r).Get(f.Key);
+            if (f.Type == "bool") return value == "true" ? "Да" : "Нет";
             if (f.Type == "ref") return Label(value);
             if (f.Type == "enum" && f.Options != null && f.Options.ContainsKey(value)) return f.Options[value];
             DateTime d; if (f.Type == "date" && DateTime.TryParseExact(value, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out d)) return d.ToString("dd.MM.yyyy");
@@ -341,24 +594,30 @@ namespace WorkLedger
         public void RefreshView()
         {
             if (refreshing || party.Items.Count == 0 || current == "create-act") return;
-            if (current != "overview" && current != "audit" && from.Checked && to.Checked && from.Value.Date > to.Value.Date)
+            if (FilterAvailable("dates") && from.Checked && to.Checked && from.Value.Date > to.Value.Date)
             {
                 grid.Columns.Clear(); grid.Rows.Clear(); table = new TableData { Title = "Некорректный период" };
-                count.Text = "Дата начала периода должна быть раньше даты окончания."; return;
+                count.Text = "Дата «С» должна быть не позже даты «По». Исправьте период или нажмите «Сбросить»."; return;
             }
             if (current == "overview") { RenderOverview(); return; }
-            if (current == "reports") { direction.Enabled = report.SelectedIndex != 1; hint.Text = report.SelectedIndex == 0 || report.SelectedIndex == 3 ? "Даты фильтруют даты документов; остатки и исполнение показаны на сегодня." : report.SelectedIndex == 1 ? "Затраты включают всех подрядчиков объекта. Контрагент в фильтре — основной заказчик объекта." : report.SelectedIndex == 2 ? "Сальдо по актам и всем платежам, включая авансы. Положительное — нам должны, отрицательное — мы должны." : "Даты фильтруют даты документов. Валюты считаются отдельно."; table = BuildReport(); }
+            if (current == "reports") { ConfigureFilters(false); hint.Text = report.SelectedIndex == 0 || report.SelectedIndex == 3 ? "Даты фильтруют даты документов; остатки и исполнение показаны на сегодня." : report.SelectedIndex == 1 ? "Затраты включают всех подрядчиков объекта. Контрагент в фильтре — основной заказчик объекта." : report.SelectedIndex == 2 ? "Сальдо по актам и всем платежам, включая авансы. Положительное — нам должны, отрицательное — мы должны." : "Даты фильтруют даты документов. Валюты считаются отдельно."; table = BuildReport(); }
             else if (current == "audit")
             {
                 table = new TableData { Title = "История изменений" }; table.Headers.AddRange(new[] { "Дата и время", "Пользователь", "Действие", "Раздел", "Описание" });
-                foreach (var a in store.Audit.AsEnumerable().Reverse()) table.Add(a.Id, AuditTime(a.Date), a.User, Store.ActionLabel(a.Action), Store.KindLabel(a.Kind), a.Summary);
+                foreach (var a in store.Audit.AsEnumerable().Reverse().Where(a => AuditInPeriod(a.Date)))
+                {
+                    var values = new[] { AuditTime(a.Date), a.User, Store.ActionLabel(a.Action), Store.KindLabel(a.Kind), a.Summary };
+                    if (FilterText.Matches(values, search.Text)) table.Add(a.Id, values);
+                }
             }
             else
             {
                 var schema = Catalog.Get(current); table = new TableData { Title = schema.Title };
                 var fields = schema.Fields.Where(f => f.Key != "filePath" && f.Key != "notes" && f.Key != "requisites" && f.Key != "contact" && (f.Type != "memo" || f.Key == "description")).ToList();
-                if (current == "party") fields = fields.Where(f => new[] { "name", "role", "unp", "phone", "email", "bankAccount" }.Contains(f.Key)).ToList();
+                if (current == "party") fields = fields.Where(f => new[] { "name", "role", "unp", "phone", "email", "bankAccount", "monthlyServiceEnabled", "monthlyServiceAmount", "monthlyServiceCurrency" }.Contains(f.Key)).ToList();
                 foreach (var f in fields) table.Headers.Add(f.Label);
+                bool derivedCurrency = FilterAvailable("currency") && !fields.Any(f => f.Key == "currency");
+                if (derivedCurrency) table.Headers.Add("Валюта");
                 if (current == "act") table.Headers.AddRange(new[] { "Зачтено", "Общий остаток", "Удержано", "К оплате", "Оплата" });
                 if (current == "invoice") table.Headers.Add("Оплата по акту");
                 if (current == "payment") table.Headers.AddRange(new[] { "Зачтено в акты", "Аванс" });
@@ -367,9 +626,10 @@ namespace WorkLedger
                 if (current == "work") table.Headers.Add("Сумма");
                 if (current == "project") table.Headers.AddRange(new[] { "Выручка (" + Curr + ")", "Затраты (" + Curr + ")", "Прибыль (" + Curr + ")" });
                 table.Headers.Add("В архиве");
-                foreach (var r in store.Records.Where(x => x.Kind == current && (archived.Checked || x.Get("archived") != "true")).Where(x => Match(x, true)).OrderByDescending(x => x.Get("date")).ThenBy(x => x.Get("number")))
+                foreach (var r in store.Records.Where(x => x.Kind == current && (archived.Checked || x.Get("archived") != "true")).Where(x => Match(x, true) && MatchesSearch(x)).OrderByDescending(x => x.Get("date")).ThenBy(x => x.Get("number")))
                 {
                     var row = fields.Select(f => Value(r, f)).ToList();
+                    if (derivedCurrency) row.Add(Effective(r).Get("currency"));
                     if (current == "act") row.AddRange(new[] { F(store.AllocatedToAct(r.Id)), F(store.ActGrossDue(r.Id)), F(store.ActiveHolds(r.Id)), F(store.ActDue(r.Id)), Status(r) });
                     if (current == "invoice") { var a = store.Find(r.Get("actId")); row.Add(a == null ? "Акт не указан" : Status(a)); }
                     if (current == "payment") row.AddRange(new[] { F(store.AllocatedFromPayment(r.Id)), F(store.PaymentUnallocated(r.Id)) });
@@ -381,19 +641,21 @@ namespace WorkLedger
                     table.Ids.Add(r.Id); table.Rows.Add(row);
                 }
             }
-            var query = search.Text.Trim();
             grid.Columns.Clear(); grid.Rows.Clear();
             foreach (var h in table.Headers) grid.Columns.Add("c" + grid.Columns.Count, h);
             int visible = 0;
             for (int i = 0; i < table.Rows.Count; i++)
             {
-                if (query != "" && !table.Rows[i].Any(v => (v ?? "").IndexOf(query, StringComparison.CurrentCultureIgnoreCase) >= 0)) continue;
                 int n = grid.Rows.Add(table.Rows[i].Cast<object>().ToArray()); grid.Rows[n].Tag = table.Ids[i]; visible++;
                 var r = store.Find(table.Ids[i]);
                 if (r != null && r.Kind == "act" && r.Get("status") == "signed" && store.ActDue(r.Id) > 0 && r.Get("dueDate") != "" && String.CompareOrdinal(r.Get("dueDate"), DateTime.Today.ToString("yyyy-MM-dd")) < 0) grid.Rows[n].DefaultCellStyle.ForeColor = Color.Firebrick;
                 if (r != null && r.Get("archived") == "true") grid.Rows[n].DefaultCellStyle.ForeColor = Color.Gray;
             }
-            count.Text = "Записей: " + visible + "    ·    " + (Curr == "Все валюты" ? Curr : "Валюта: " + Curr);
+            count.Text = (visible == 0 ? "Нет записей по выбранным фильтрам. Нажмите «Сбросить», чтобы начать заново." : "Строк: " + visible)
+                + (FilterAvailable("currency") ? "    ·    " + (Curr == "Все валюты" ? Curr : "Валюта: " + Curr) : "");
+            if (current == "work") hint.Text = "Период — по дате сметы. Поиск учитывает наименование работ, смету, контрагента и объект.";
+            if (current == "audit") hint.Text = "Поиск по описанию, пользователю и разделу. Период — по местному времени Минска.";
+            if (current == "reports" && search.Text.Trim() != "") hint.Text += " Поиск применяется до расчёта итогов.";
         }
         private string Status(Record r)
         {
@@ -402,12 +664,21 @@ namespace WorkLedger
             if (store.ActDue(r.Id) == 0) return "Удержание";
             return store.AllocatedToAct(r.Id) > 0 ? "Частично оплачен" : "Не оплачен";
         }
+        internal Record NewRecordForCurrentSection()
+        {
+            var record = new Record(current); var schema = Catalog.Get(current);
+            if (schema == null) return record;
+            if (schema.Fields.Any(f => f.Key == "currency")) record.Set("currency", Curr == "Все валюты" || Curr == "" ? BaseCurrency : Curr);
+            if (schema.Fields.Any(f => f.Key == "partyId") && PartyId != "") record.Set("partyId", PartyId);
+            if (schema.Fields.Any(f => f.Key == "projectId") && ProjectId != "" && ProjectId != "__none__") record.Set("projectId", ProjectId);
+            if (schema.Fields.Any(f => f.Key == "direction") && Dir != "") record.Set("direction", Dir);
+            return record;
+        }
         private void Add()
         {
             if (current == "act") { Navigate("create-act"); return; }
-            var r = new Record { Kind = current }; r.Fields["currency"] = Curr; if (PartyId != "") r.Fields["partyId"] = PartyId;
-            if (Dir != "") r.Fields["direction"] = Dir;
-            using (var editor = new RecordEditor(store, Catalog.Get(current), r)) if (editor.ShowDialog(this) == DialogResult.OK) { RefillParties(); RefreshView(); }
+            var r = NewRecordForCurrentSection();
+            using (var editor = new RecordEditor(store, Catalog.Get(current), r)) if (editor.ShowDialog(this) == DialogResult.OK) { RefillParties(); RefreshView(); if (r.Kind == "party") RefreshMonthlyServiceAutomation(); }
         }
         private void Edit()
         {
@@ -420,13 +691,13 @@ namespace WorkLedger
                 return;
             }
             var schema = Catalog.Get(r.Kind); if (schema == null) return;
-            using (var editor = new RecordEditor(store, schema, r)) if (editor.ShowDialog(this) == DialogResult.OK) { RefillParties(); RefreshView(); }
+            using (var editor = new RecordEditor(store, schema, r)) if (editor.ShowDialog(this) == DialogResult.OK) { RefillParties(); RefreshView(); if (r.Kind == "party") RefreshMonthlyServiceAutomation(); }
         }
         private void FocusRecord(Record r)
         {
-            refreshing = true; search.Text = ""; party.SelectedIndex = 0; direction.SelectedIndex = 0; from.Checked = to.Checked = false; archived.Checked = r.Get("archived") == "true";
+            Navigate(r.Kind); refreshing = true; ResetFilters(); archived.Checked = r.Get("archived") == "true";
             var value = Effective(r).Get("currency"); if (currency.Items.Contains(value)) currency.SelectedItem = value;
-            Navigate(r.Kind); refreshing = false; RefreshView(); SelectId(r.Id);
+            refreshing = false; RefreshView(); SelectId(r.Id);
         }
         private void SelectId(string id) { foreach (DataGridViewRow row in grid.Rows) if (Convert.ToString(row.Tag) == id) { grid.ClearSelection(); row.Selected = true; grid.CurrentCell = row.Cells[0]; break; } }
         private void Archive()
@@ -434,7 +705,7 @@ namespace WorkLedger
             var r = Selected(); if (r == null) return;
             if (r.Get("archived") == "true") { r.Fields["archived"] = "false"; store.Upsert(r); }
             else if (MessageBox.Show(this, "Перенести запись в архив? Связанные и финансовые данные сохраняются.", "Архив", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes) store.Archive(r.Id);
-            RefillParties(); RefreshView();
+            RefillParties(); RefreshView(); if (r.Kind == "party") RefreshMonthlyServiceAutomation();
         }
         private void Allocate()
         {
@@ -495,7 +766,7 @@ namespace WorkLedger
             {
                 if (dlg.ShowDialog(this) != DialogResult.OK) return;
                 var incoming = TableIO.Read(dlg.FileName);
-                using (var preview = new ImportDialog(store, schema, incoming, Curr)) if (preview.ShowDialog(this) == DialogResult.OK) { RefillParties(); RefreshView(); }
+                using (var preview = new ImportDialog(store, schema, incoming, !FilterAvailable("currency") || Curr == "Все валюты" ? BaseCurrency : Curr)) if (preview.ShowDialog(this) == DialogResult.OK) { RefillParties(); RefreshView(); if (current == "party") RefreshMonthlyServiceAutomation(); }
             }
         }
         private void Backup()
@@ -515,7 +786,7 @@ namespace WorkLedger
                 string before = Path.Combine(Path.GetDirectoryName(store.DataDir), "WorkLedger-before-restore-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".zip");
                 BackupArchive.Create(store.DataDir, before);
                 BackupArchive.Restore(dlg.FileName, store.DataDir, ValidateSnapshot);
-                store = new Store(store.DataDir); RefillParties(); RefreshView();
+                store = new Store(store.DataDir); RefillParties(); RefreshView(); RefreshMonthlyServiceAutomation();
                 MessageBox.Show(this, "База восстановлена.\nПредыдущая база сохранена:\n" + before, "Восстановление");
             }
         }
@@ -540,11 +811,11 @@ namespace WorkLedger
         internal Dictionary<string, string> BuildDocumentDetails(Record r)
         {
             var details = new Dictionary<string, string>();
-            var own = r.Get("workItems") == "" ? store.Of("settings").FirstOrDefault() : Store.GetActSnapshot(r, "organizationSnapshot");
+            var own = Store.GetActSnapshot(r, "organizationSnapshot") ?? store.Of("settings").FirstOrDefault();
             string organizationDetails = PrintReport.OrganizationDetails(own);
             if (!String.IsNullOrWhiteSpace(organizationDetails)) details["Организация"] = organizationDetails;
             foreach (var f in Catalog.Get(r.Kind).Fields.Where(f => f.Key != "filePath")) if (r.Get(f.Key) != "") details[f.Label] = Value(r, f);
-            var cp = r.Get("workItems") == "" ? store.Find(r.Get("partyId")) : Store.GetActSnapshot(r, "partySnapshot");
+            var cp = Store.GetActSnapshot(r, "partySnapshot") ?? store.Find(r.Get("partyId"));
             string counterpartyDetails = PrintReport.OrganizationDetails(cp);
             if (!String.IsNullOrWhiteSpace(counterpartyDetails)) details["Реквизиты контрагента"] = counterpartyDetails;
             return details;
@@ -582,9 +853,8 @@ namespace WorkLedger
         }
         private void ShowAllActs()
         {
-            refreshing = true; search.Text = ""; party.SelectedIndex = 0; direction.SelectedIndex = 0;
-            from.Checked = to.Checked = false; archived.Checked = true; currency.SelectedItem = "Все валюты";
-            refreshing = false; Navigate("act");
+            Navigate("act"); refreshing = true; ResetFilters(); archived.Checked = true; currency.SelectedItem = "Все валюты";
+            refreshing = false; RefreshView();
         }
         private void PreviewAct()
         {
@@ -605,7 +875,7 @@ namespace WorkLedger
         {
             var r = Selected(); if (r == null) return;
             string path = PrintPath();
-            if (r.Kind == "act" && r.Get("workItems") != "") { HourlyActDocuments.WriteHtml(path, store, r); Open(path); return; }
+            if (r.Kind == "act" && (r.Get("workItems") != "" || r.Get("serviceGenerated") == "true")) { HourlyActDocuments.WriteHtml(path, store, r); Open(path); return; }
             var details = BuildDocumentDetails(r);
             var headers = new List<string>(); var rows = new List<List<string>>();
             if (r.Kind == "estimate")
@@ -629,17 +899,18 @@ namespace WorkLedger
             {
                 var parent = store.Find(result.Get(link)); if (parent == null) continue;
                 foreach (string key in new[] { "partyId", "projectId", "contractId", "currency", "direction" })
-                    if (result.Get(key) == "" && parent.Get(key) != "") result.Fields[key] = parent.Get(key);
+                    if (result.Get(key) == "" && parent.Get(key) != "" && !(r.Kind == "expense" && key == "partyId" && parent.Kind == "project")) result.Fields[key] = parent.Get(key);
+                if (result.Kind == "work" && parent.Kind == "estimate" && result.Get("date") == "") result.Set("date", parent.Get("date"));
             }
+            if (result.Kind == "expense") result.Set("direction", "expense");
             return result;
         }
         private IEnumerable<Record> ProjectRecords(string kind, bool dates)
         {
-            return store.Records.Where(r => r.Kind == kind).Select(Effective).Where(r => r.Get("currency") == Curr).Where(r =>
+            return store.Records.Where(r => r.Kind == kind).Select(Effective).Where(r => r.Get("currency") == Curr && MatchesProject(r)).Where(r =>
             {
-                if (!dates) return true;
-                DateTime d; if (!DateTime.TryParseExact(r.Get("date"), "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out d)) return true;
-                return (!from.Checked || d.Date >= from.Value.Date) && (!to.Checked || d.Date <= to.Value.Date);
+                if (!dates || !DateRangeActive) return true;
+                DateTime d; return DateTime.TryParseExact(r.Get("date"), "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out d) && InPeriod(d);
             });
         }
         private static string AuditTime(string utc)
@@ -692,7 +963,8 @@ namespace WorkLedger
         }
         private IEnumerable<Record> Financial(string kind, bool dates)
         {
-            return store.Records.Where(r => r.Kind == kind).Select(Effective).Where(r => Match(r, dates));
+            return store.Records.Where(r => r.Kind == kind).Select(Effective).Where(r => Match(r, dates))
+                .Where(r => current != "reports" || report.SelectedIndex == 1 || MatchesSearch(r));
         }
         private decimal[] ProjectTotals(string projectId, bool dates)
         {
@@ -703,6 +975,7 @@ namespace WorkLedger
         }
         private string PeriodText()
         {
+            if (!FilterAvailable("dates")) return "За всё время";
             return "Период: " + (from.Checked ? from.Value.ToString("dd.MM.yyyy") : "с начала учёта") + " — " + (to.Checked ? to.Value.ToString("dd.MM.yyyy") : "всё время");
         }
         public TableData BuildReport()
@@ -718,7 +991,7 @@ namespace WorkLedger
             else if (report.SelectedIndex == 1)
             {
                 t.Headers.AddRange(new[] { "Объект", "Выручка по актам", "Акты подрядчиков", "Прочие расходы", "Всего затрат", "Прибыль", "Поступило денег", "Выплачено денег" });
-                foreach (var p in store.Records.Where(r => r.Kind == "project" && (PartyId == "" || r.Get("partyId") == PartyId)))
+                foreach (var p in store.Records.Where(r => r.Kind == "project" && (PartyId == "" || r.Get("partyId") == PartyId) && MatchesProject(r) && MatchesSearch(r)))
                 {
                     var acts = ProjectRecords("act", true).Where(r => r.Get("projectId") == p.Id && r.Get("status") == "signed").ToList();
                     decimal revenue = acts.Where(r => r.Get("direction") == "income").Sum(r => Money(r));
@@ -726,11 +999,18 @@ namespace WorkLedger
                     var pay = ProjectRecords("payment", true).Where(r => r.Get("projectId") == p.Id).ToList();
                     t.Add(p.Id, p.Get("name"), F(revenue), F(sub), F(exp), F(sub + exp), F(revenue - sub - exp), F(pay.Where(r => r.Get("direction") == "income").Sum(r => Money(r))), F(pay.Where(r => r.Get("direction") == "expense").Sum(r => Money(r))));
                 }
-                var noProject = ProjectRecords("act", true).Where(r => r.Get("projectId") == "" && (PartyId == "" || r.Get("partyId") == PartyId) && r.Get("status") == "signed").ToList();
-                if (noProject.Count > 0)
+                Func<Record, bool> noProjectMatch = r => r.Get("projectId") == "" && (PartyId == "" || r.Get("partyId") == PartyId)
+                    && (FilterText.Matches(new[] { "Без объекта" }, search.Text) || MatchesSearch(r));
+                var noProject = ProjectRecords("act", true).Where(noProjectMatch).Where(r => r.Get("status") == "signed").ToList();
+                var noProjectExpenses = ProjectRecords("expense", true).Where(noProjectMatch).ToList();
+                var noProjectPayments = ProjectRecords("payment", true).Where(noProjectMatch).ToList();
+                if (noProject.Count > 0 || noProjectExpenses.Count > 0 || noProjectPayments.Count > 0)
                 {
-                    decimal earned = noProject.Where(r => r.Get("direction") == "income").Sum(r => Money(r)), spent = noProject.Where(r => r.Get("direction") == "expense").Sum(r => Money(r));
-                    t.Add("", "Без объекта", F(earned), F(spent), F(0), F(spent), F(earned - spent), "—", "—");
+                    decimal earned = noProject.Where(r => r.Get("direction") == "income").Sum(r => Money(r));
+                    decimal subcontractors = noProject.Where(r => r.Get("direction") == "expense").Sum(r => Money(r));
+                    decimal otherCosts = noProjectExpenses.Sum(r => Money(r));
+                    t.Add("", "Без объекта", F(earned), F(subcontractors), F(otherCosts), F(subcontractors + otherCosts), F(earned - subcontractors - otherCosts),
+                        F(noProjectPayments.Where(r => r.Get("direction") == "income").Sum(r => Money(r))), F(noProjectPayments.Where(r => r.Get("direction") == "expense").Sum(r => Money(r))));
                 }
             }
             else if (report.SelectedIndex == 2)
@@ -748,7 +1028,7 @@ namespace WorkLedger
                     balance += e.Item2;
                     t.Add(e.Item1.Id, D(e.Item1.Get("date")), (e.Item1.Kind == "act" ? "Акт " : "Оплата ") + e.Item1.Get("number"), Label(e.Item1.Get("partyId")), e.Item2 > 0 ? F(e.Item2) : "", e.Item2 < 0 ? F(-e.Item2) : "", F(e.Item2), F(balance));
                 }
-                t.Add("", "", "Итоговое сальдо (включая авансы)", "", "", "", "", F(balance));
+                t.Add("", "", search.Text.Trim() == "" ? "Итоговое сальдо (включая авансы)" : "Итог по найденным документам (включая авансы)", "", "", "", "", F(balance));
             }
             else if (report.SelectedIndex == 3)
             {
@@ -840,6 +1120,10 @@ namespace WorkLedger
     public sealed class AllocationDialog : Form
     {
         private Store store;
+
+
+
+
         private ComboBox payments = new ComboBox(), acts = new ComboBox();
         private TextBox amount = new TextBox();
         private Label help = new Label();

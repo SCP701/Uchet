@@ -27,6 +27,7 @@ namespace WorkLedger
         private readonly Button save;
         private readonly TabControl sections;
         private bool autoSelecting;
+        private Label monthlyServiceInfo;
         public Record ResultRecord { get; private set; }
 
         public RecordEditor(Store store, Schema schema, Record existing)
@@ -84,6 +85,7 @@ namespace WorkLedger
             }
             else content = BuildFields(schema.Fields);
             WireRelatedReferences();
+            WireMonthlyService();
             Panel footer = new Panel { Dock = DockStyle.Bottom, Height = 83, BackColor = Color.White, Padding = new Padding(24, 15, 24, 15) };
             FlowLayoutPanel buttons = new FlowLayoutPanel
             {
@@ -138,7 +140,8 @@ namespace WorkLedger
             {
                 Label label = new Label
                 {
-                    Text = field.Label + (field.Required ? " *" : ""),
+                    Text = field.Type == "bool" ? "" : field.Label +
+                        (field.Required || IsRequiredMonthlyServiceField(field.Key) ? " *" : ""),
                     AutoSize = true, Anchor = AnchorStyles.Left | AnchorStyles.Top,
                     Margin = new Padding(0, 8, 12, 15), MaximumSize = new Size(207, 0)
                 };
@@ -151,6 +154,19 @@ namespace WorkLedger
                 table.Controls.Add(input, 1, row);
                 ++row;
             }
+            if (fields.Any(f => f.Key == "monthlyServiceEnabled"))
+            {
+                monthlyServiceInfo = new Label
+                {
+                    AutoSize = true, MaximumSize = new Size(710, 0),
+                    ForeColor = Color.FromArgb(100, 116, 139),
+                    Margin = new Padding(0, 8, 16, 14)
+                };
+                table.RowCount = fields.Count + 1;
+                table.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+                table.Controls.Add(monthlyServiceInfo, 0, row);
+                table.SetColumnSpan(monthlyServiceInfo, 2);
+            }
             scroll.Controls.Add(table);
             return scroll;
         }
@@ -162,6 +178,45 @@ namespace WorkLedger
             if (sections != null && parent is TabPage) sections.SelectedTab = (TabPage)parent;
             input.Focus();
         }
+        private static bool IsRequiredMonthlyServiceField(string key)
+        {
+            return key == "monthlyServiceAmount" || key == "monthlyServiceCurrency" || key == "monthlyServiceStartMonth";
+        }
+
+        private static DateTime DefaultMonthlyServiceStart()
+        {
+            return Store.DefaultMonthlyServiceStart(DateTime.UtcNow.AddHours(3).Date);
+        }
+
+        private void WireMonthlyService()
+        {
+            Control input;
+            if (schema.Kind != "party" || !inputs.TryGetValue("monthlyServiceEnabled", out input)) return;
+            CheckBox enabled = (CheckBox)input;
+            enabled.CheckedChanged += delegate { UpdateMonthlyServiceFields(); };
+            ((DateTimePicker)inputs["monthlyServiceStartMonth"]).ValueChanged += delegate { UpdateMonthlyServiceFields(); };
+            tips.SetToolTip(enabled, "Создавать акт с указанной суммой для этого контрагента 1-го числа каждого месяца.");
+            tips.SetToolTip(inputs["monthlyServiceStartMonth"], "Выберите месяц первого акта. Каждый акт датируется первым числом месяца.");
+            UpdateMonthlyServiceFields();
+        }
+
+        private void UpdateMonthlyServiceFields()
+        {
+            CheckBox enabled = (CheckBox)inputs["monthlyServiceEnabled"];
+            foreach (string key in new[] { "monthlyServiceAmount", "monthlyServiceCurrency", "monthlyServiceDescription", "monthlyServiceStartMonth" })
+            {
+                inputs[key].Enabled = enabled.Checked;
+                if (!enabled.Checked) errors.SetError(inputs[key], "");
+            }
+            DateTime date = ((DateTimePicker)inputs["monthlyServiceStartMonth"]).Value;
+            DateTime first = new DateTime(date.Year, date.Month, 1);
+            if (monthlyServiceInfo != null)
+                monthlyServiceInfo.Text = enabled.Checked
+                    ? "Первый акт: " + first.ToString("dd.MM.yyyy") +
+                        ". Далее — 1-го числа каждого месяца.\r\nЕсли компьютер был выключен, пропущенные акты будут созданы при следующем запуске."
+                    : "Отметьте «Ежемесячное обслуживание» и укажите сумму. Акты будут появляться во вкладке «Акты».";
+        }
+
         private void WireRelatedReferences()
         {
             if (store.Find(source.Id) != null) return;
@@ -209,6 +264,13 @@ namespace WorkLedger
         private Control MakeInput(FieldDef field)
         {
             string value = source.Get(field.Key);
+            if (field.Type == "bool")
+                return new CheckBox
+                {
+                    Text = field.Label, Checked = String.Equals(value, "true", StringComparison.OrdinalIgnoreCase),
+                    AutoSize = true, Height = 31, Padding = new Padding(0, 4, 0, 0),
+                    UseVisualStyleBackColor = true
+                };
             if (field.Type == "date")
             {
                 DateTimePicker picker = new DateTimePicker
@@ -222,7 +284,17 @@ namespace WorkLedger
                     && date >= picker.MinDate && date <= picker.MaxDate) picker.Value = date;
                 else picker.Value = DateTime.Today;
                 picker.Checked = field.Required || !String.IsNullOrWhiteSpace(value);
-                if (!field.Required) tips.SetToolTip(picker, "Отметьте флажок, чтобы указать дату. Снимите флажок, чтобы оставить поле пустым.");
+                if (field.Key == "monthlyServiceStartMonth")
+                {
+                    picker.ShowCheckBox = false;
+                    picker.ShowUpDown = true;
+                    picker.CustomFormat = "MMMM yyyy";
+                    if (source.Get("monthlyServiceEnabled") != "true" || String.IsNullOrWhiteSpace(value))
+                        picker.Value = DefaultMonthlyServiceStart();
+                    else picker.Value = new DateTime(picker.Value.Year, picker.Value.Month, 1);
+                    picker.Checked = true;
+                }
+                else if (!field.Required) tips.SetToolTip(picker, "Отметьте флажок, чтобы указать дату. Снимите флажок, чтобы оставить поле пустым.");
                 return picker;
             }
             if (field.Type == "enum" || field.Type == "ref")
@@ -245,9 +317,9 @@ namespace WorkLedger
                 }
                 for (int i = 0; i < combo.Items.Count; ++i)
                     if (((Choice)combo.Items[i]).Value == value) { combo.SelectedIndex = i; break; }
-                if (combo.SelectedIndex < 0 && combo.Items.Count > 0)
+                if ((combo.SelectedIndex < 0 || field.Key == "monthlyServiceCurrency" && String.IsNullOrWhiteSpace(value)) && combo.Items.Count > 0)
                 {
-                    if (field.Key == "currency")
+                    if (field.Key == "currency" || field.Key == "monthlyServiceCurrency")
                     {
                         string currency = "BYN";
                         Record settings = store.Of("settings").FirstOrDefault();
@@ -261,10 +333,12 @@ namespace WorkLedger
             }
             TextBox text = new TextBox
             {
-                Text = value, BorderStyle = BorderStyle.FixedSingle,
+                Text = field.Key == "monthlyServiceDescription" && String.IsNullOrWhiteSpace(value) ? "Ежемесячное обслуживание" : value,
+                BorderStyle = BorderStyle.FixedSingle,
                 Multiline = field.Type == "memo", Height = field.Type == "memo" ? 82 : 31,
                 ScrollBars = field.Type == "memo" ? ScrollBars.Vertical : ScrollBars.None,
-                AcceptsReturn = field.Type == "memo", MaxLength = field.Type == "memo" ? 32767 : 1000
+                AcceptsReturn = field.Type == "memo",
+                MaxLength = field.Key == "monthlyServiceDescription" ? 2000 : field.Type == "memo" ? 32767 : 1000
             };
             if (field.Type == "money" || field.Type == "number")
             {
@@ -293,14 +367,21 @@ namespace WorkLedger
             errors.Clear();
             Record result = source.Clone();
             Control firstInvalid = null;
+            bool monthlyServiceEnabled = schema.Kind == "party" && inputs.ContainsKey("monthlyServiceEnabled")
+                && ((CheckBox)inputs["monthlyServiceEnabled"]).Checked;
             foreach (FieldDef field in schema.Fields)
             {
                 Control input = inputs[field.Key];
+                if (!monthlyServiceEnabled && field.Key.StartsWith("monthlyService", StringComparison.Ordinal) &&
+                    field.Key != "monthlyServiceEnabled") continue;
                 string value;
-                if (field.Type == "date")
+                if (field.Type == "bool") value = ((CheckBox)input).Checked ? "true" : "false";
+                else if (field.Type == "date")
                 {
                     DateTimePicker picker = (DateTimePicker)input;
-                    value = picker.Checked ? picker.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) : "";
+                    DateTime date = field.Key == "monthlyServiceStartMonth"
+                        ? new DateTime(picker.Value.Year, picker.Value.Month, 1) : picker.Value;
+                    value = picker.Checked ? date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) : "";
                 }
                 else if (field.Type == "enum" || field.Type == "ref")
                 {
@@ -309,13 +390,20 @@ namespace WorkLedger
                 }
                 else value = input.Text.Trim();
                 string error = "";
-                if (field.Required && String.IsNullOrWhiteSpace(value)) error = "Заполните поле «" + field.Label + "».";
+                if ((field.Required || monthlyServiceEnabled && IsRequiredMonthlyServiceField(field.Key)) && String.IsNullOrWhiteSpace(value))
+                    error = "Заполните поле «" + field.Label + "».";
+                if (field.Key == "monthlyServiceDescription" && String.IsNullOrWhiteSpace(value))
+                    value = "Ежемесячное обслуживание";
+                if (field.Key == "monthlyServiceDescription" && value.Length > 2000)
+                    error = "Наименование работ не должно превышать 2000 символов.";
                 if (error.Length == 0 && value.Length > 0 && (field.Type == "money" || field.Type == "number"))
                 {
                     decimal amount;
                     if (!TryDecimal(value, out amount)) error = "Введите число. Например: 1250,50.";
                     else if (Decimal.Round(amount, field.Type == "money" ? 2 : 6) != amount)
                         error = field.Type == "money" ? "Допустимо не более двух знаков после запятой." : "Допустимо не более шести знаков после запятой.";
+                    else if (field.Key == "monthlyServiceAmount" && amount <= 0m)
+                        error = "Сумма ежемесячного обслуживания должна быть больше нуля.";
                     else if (field.Type == "money") value = Store.MoneyString(amount);
                     else value = amount.ToString("0.######", CultureInfo.InvariantCulture);
                 }

@@ -100,6 +100,94 @@ namespace WorkLedger
             }
             return next;
         }
+        public static DateTime DefaultMonthlyServiceStart(DateTime today)
+        {
+            DateTime month = new DateTime(today.Year, today.Month, 1);
+            return today.Day == 1 ? month : month.AddMonths(1);
+        }
+        public static void PrepareMonthlyServiceSettings(Record party, Record previous, DateTime today)
+        {
+            if (party == null || party.Kind != "party") throw new ArgumentException("Не указан контрагент.");
+            if (party.Get("monthlyServiceEnabled") != "true") return;
+            string start = party.Get("monthlyServiceStartMonth");
+            bool reenabled = previous != null && previous.Get("monthlyServiceEnabled") != "true";
+            if (start == "" || (reenabled && start == previous.Get("monthlyServiceStartMonth")))
+                party.Set("monthlyServiceStartMonth", DateString(DefaultMonthlyServiceStart(today)));
+            if (party.Get("monthlyServiceCurrency") == "") party.Set("monthlyServiceCurrency", "BYN");
+            if (String.IsNullOrWhiteSpace(party.Get("monthlyServiceDescription"))) party.Set("monthlyServiceDescription", "Ежемесячное обслуживание");
+        }
+        private static DateTime MonthlyServiceStart(Record party)
+        {
+            DateTime start;
+            if (!DateTime.TryParseExact(party.Get("monthlyServiceStartMonth"), "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out start) || start.Day != 1)
+                throw new InvalidOperationException("Укажите первый месяц ежемесячного обслуживания (первое число месяца).");
+            return start;
+        }
+        private static void ValidateMonthlyServiceSettings(Record party)
+        {
+            string enabled = party.Get("monthlyServiceEnabled");
+            if (enabled != "" && enabled != "true" && enabled != "false") throw new InvalidOperationException("Некорректный признак ежемесячного обслуживания.");
+            if (enabled != "true") return;
+            Required(party, "monthlyServiceAmount", "monthlyServiceCurrency", "monthlyServiceStartMonth");
+            decimal amount = ParseDecimal(party.Get("monthlyServiceAmount"));
+            if (amount <= 0 || amount != ParseMoney(party.Get("monthlyServiceAmount")))
+                throw new InvalidOperationException("Сумма ежемесячного обслуживания должна быть больше нуля и содержать не более 2 знаков после запятой.");
+            Choice(party, "monthlyServiceCurrency", "BYN", "RUB", "USD", "EUR");
+            MonthlyServiceStart(party);
+            if (party.Get("monthlyServiceDescription").Length > 2000) throw new InvalidOperationException("Наименование ежемесячного обслуживания должно содержать не более 2000 символов.");
+        }
+        public List<Record> GenerateMonthlyServiceActs(DateTime today)
+        {
+            lock (gate)
+            {
+                DateTime currentMonth = new DateTime(today.Year, today.Month, 1);
+                List<Record> staged = records.Select(r => r.Clone()).ToList();
+                HashSet<string> existing = new HashSet<string>(staged.Where(r => r.Kind == "act" && r.Get("serviceGenerated") == "true")
+                    .Select(r => r.Get("recurringPartyId") + "|" + r.Get("monthlyServiceMonth")), StringComparer.Ordinal);
+                List<Record> pending = new List<Record>();
+                JavaScriptSerializer serializer = new JavaScriptSerializer { MaxJsonLength = 100000, RecursionLimit = 20 };
+                Record settings = staged.FirstOrDefault(r => r.Kind == "settings" && r.Get("archived") != "true");
+                foreach (Record party in staged.Where(r => r.Kind == "party" && r.Get("archived") != "true" && r.Get("monthlyServiceEnabled") == "true").OrderBy(r => r.Get("name")).ThenBy(r => r.Id).ToList())
+                {
+                    ValidateMonthlyServiceSettings(party);
+                    DateTime start = MonthlyServiceStart(party);
+                    int months = (currentMonth.Year - start.Year) * 12 + currentMonth.Month - start.Month + 1;
+                    int missingMonths = 0;
+                    for (int index = 0; index < months; index++)
+                    {
+                        DateTime month = start.AddMonths(index);
+                        string period = month.ToString("yyyy-MM", CultureInfo.InvariantCulture);
+                        string identity = party.Id + "|" + period;
+                        if (!existing.Add(identity)) continue;
+                        if (++missingMonths > 240) throw new InvalidOperationException("Для контрагента «" + party.Get("name") + "» задано более 20 лет пропущенных месяцев обслуживания. Проверьте первый месяц обслуживания.");
+                        Record act = new Record("act");
+                        act.Set("partyId", party.Id); act.Set("date", DateString(month));
+                        act.Set("currency", party.Get("monthlyServiceCurrency")); act.Set("amount", MoneyString(ParseMoney(party.Get("monthlyServiceAmount"))));
+                        act.Set("direction", "income"); act.Set("status", "draft");
+                        string description = party.Get("monthlyServiceDescription");
+                        if (description == "") description = "Ежемесячное обслуживание";
+                        act.Set("description", description + " за " + month.ToString("MMMM yyyy", CultureInfo.GetCultureInfo("ru-RU")).ToLower(CultureInfo.GetCultureInfo("ru-RU")) + " г.");
+                        act.Set("serviceGenerated", "true"); act.Set("recurringPartyId", party.Id); act.Set("monthlyServiceMonth", period);
+                        act.Set("partySnapshot", serializer.Serialize(party.Clone()));
+                        act.Set("organizationSnapshot", settings == null ? "" : serializer.Serialize(settings.Clone()));
+                        pending.Add(act);
+                    }
+                }
+                if (pending.Count == 0) return new List<Record>();
+                List<Record> added = pending.OrderBy(r => r.Get("date"), StringComparer.Ordinal).ThenBy(r => r.Get("partyId"), StringComparer.Ordinal).ToList();
+                long next = NextActNumberFor(staged);
+                List<AuditEntry> entries = new List<AuditEntry>();
+                foreach (Record act in added)
+                {
+                    if (next >= Int64.MaxValue - 1) throw new InvalidOperationException("Достигнут предел автоматической нумерации актов.");
+                    act.Set("number", next.ToString(CultureInfo.InvariantCulture)); act.Set("autoNumber", "true"); next++;
+                    Normalize(act); staged.Add(act); entries.Add(MakeAudit("create", null, act));
+                }
+                Validate(staged); StageActCounter(staged, entries); Validate(staged);
+                Commit(staged, entries);
+                return added.Select(r => r.Clone()).ToList();
+            }
+        }
         public Record CreateHourlyActDraft(string partyId)
         {
             lock (gate)
@@ -249,6 +337,12 @@ namespace WorkLedger
                 Record old = staged.FirstOrDefault(r => r.Id == candidate.Id);
                 if (old != null && old.Kind != candidate.Kind) throw new InvalidOperationException("Тип записи нельзя менять.");
 
+                if (candidate.Kind == "party") PrepareMonthlyServiceSettings(candidate, old, DateTime.UtcNow.AddHours(3).Date);
+                if (old != null && old.Kind == "act" && old.Get("serviceGenerated") == "true")
+                {
+                    if (candidate.Get("partyId") != old.Get("partyId")) throw new InvalidOperationException("Контрагента автоматически созданного ежемесячного акта менять нельзя.");
+                    foreach (string key in new[] { "serviceGenerated", "recurringPartyId", "monthlyServiceMonth", "partySnapshot", "organizationSnapshot" }) candidate.Set(key, old.Get(key));
+                }
                 if (old != null && old.Kind == "allocation") throw new InvalidOperationException("Распределение оплаты нельзя редактировать. Используйте сторнирование распределения.");
                 foreach (string key in LinkKeys)
                 {
@@ -303,6 +397,7 @@ namespace WorkLedger
                         {
                             r.Set("number", NextActNumberFor(staged).ToString(CultureInfo.InvariantCulture)); r.Set("autoNumber", "true");
                         }
+                        if (r.Kind == "party") PrepareMonthlyServiceSettings(r, null, DateTime.UtcNow.AddHours(3).Date);
                         Normalize(r); added.Add(r); staged.Add(r);
                     }
                     catch (Exception e) { throw new InvalidOperationException("Строка импорта " + (i + 1).ToString(CultureInfo.InvariantCulture) + ": " + e.Message, e); }
@@ -434,6 +529,18 @@ namespace WorkLedger
                 if (rate <= 0 || rate != ParseMoney(r.Get("hourlyRate"))) throw new InvalidOperationException("Ставка за час должна быть больше нуля и содержать не более 2 знаков после запятой.");
                 r.Set("hourlyRate", MoneyString(rate));
             }
+            if (r.Kind == "party" && r.Get("monthlyServiceEnabled") == "true")
+            {
+                if (r.Get("monthlyServiceAmount") != "")
+                {
+                    decimal monthlyAmount = ParseDecimal(r.Get("monthlyServiceAmount"));
+                    if (monthlyAmount <= 0 || monthlyAmount != ParseMoney(r.Get("monthlyServiceAmount"))) throw new InvalidOperationException("Сумма ежемесячного обслуживания должна быть больше нуля и содержать не более 2 знаков после запятой.");
+                    r.Set("monthlyServiceAmount", MoneyString(monthlyAmount));
+                }
+                DateTime start;
+                if (DateTime.TryParseExact(r.Get("monthlyServiceStartMonth"), "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out start))
+                    r.Set("monthlyServiceStartMonth", DateString(new DateTime(start.Year, start.Month, 1)));
+            }
             if (r.Kind == "act" && r.Get("workItems") != "") SetHourlyActLines(r, GetHourlyActLines(r));
             if (r.Kind == "work")
             {
@@ -446,6 +553,10 @@ namespace WorkLedger
             switch (key)
             {
                 case "notes": return "Примечания"; case "contact": return "Контактное лицо"; case "phone": return "Телефон"; case "email": return "Электронная почта"; case "requisites": return "Реквизиты"; case "location": return "Адрес объекта"; case "unit": return "Единица измерения"; case "filePath": return "Вложение"; case "archived": return "Архив"; case "reversed": return "Сторнировано"; case "name": return "Наименование"; case "number": return "Номер"; case "date": return "Дата";
+                case "monthlyServiceEnabled": return "Ежемесячное обслуживание"; case "monthlyServiceAmount": return "Сумма в месяц";
+                case "monthlyServiceCurrency": return "Валюта обслуживания"; case "monthlyServiceDescription": return "Наименование услуги";
+                case "monthlyServiceStartMonth": return "Первый месяц обслуживания"; case "monthlyServiceMonth": return "Месяц обслуживания";
+                case "recurringPartyId": return "Контрагент обслуживания"; case "serviceGenerated": return "Автоматический ежемесячный акт";
                 case "hourlyRate": return "Ставка за час"; case "nextActNumber": return "Следующий номер акта"; case "hours": return "Всего часов"; case "workItems": return "Строки работ"; case "partySnapshot": return "Реквизиты контрагента в акте"; case "organizationSnapshot": return "Реквизиты организации в акте";
                 case "dueDate": return "Срок оплаты"; case "signedDate": return "Дата подписания"; case "reversedDate": return "Дата сторнирования";
                 case "website": return "Сайт"; case "chiefAccountantName": return "ФИО главного бухгалтера"; case "chiefAccountantPhone": return "Телефон главного бухгалтера";
@@ -526,7 +637,7 @@ namespace WorkLedger
                 if (project != null && r.Get("direction") == "income") Same(r, project, "partyId");
                 if (contract != null) Same(r, contract, "partyId", "projectId", "currency", "direction");
                 if (act != null && r.Kind != "allocation" && r.Kind != "hold") Same(r, act, "partyId", "projectId", "contractId", "currency", "direction");
-                if (r.Kind == "party") { Required(r, "name"); Choice(r, "role", "client", "vendor", "both"); }
+                if (r.Kind == "party") { Required(r, "name"); Choice(r, "role", "client", "vendor", "both"); ValidateMonthlyServiceSettings(r); }
                 else if (r.Kind == "project") { Required(r, "name"); Choice(r, "status", "active", "complete"); }
                 else if (r.Kind == "contract") { Required(r, "number", "amount", "currency", "direction"); Choice(r, "status", "active", "complete", "cancelled"); }
                 else if (r.Kind == "amendment") { Required(r, "number", "amount"); Choice(r, "status", "draft", "signed", "cancelled"); }
@@ -540,6 +651,14 @@ namespace WorkLedger
                 else if (r.Kind == "act")
                 {
                     Required(r, "number", "amount", "currency", "direction"); Choice(r, "status", "draft", "sent", "signed", "cancelled");
+                    if (r.Get("serviceGenerated") != "" && r.Get("serviceGenerated") != "true" && r.Get("serviceGenerated") != "false") throw new InvalidOperationException("Некорректный признак автоматического ежемесячного акта.");
+                    if (r.Get("serviceGenerated") == "true" || r.Get("recurringPartyId") != "" || r.Get("monthlyServiceMonth") != "")
+                    {
+                        DateTime month;
+                        if (r.Get("serviceGenerated") != "true" || r.Get("recurringPartyId") != r.Get("partyId") || !DateTime.TryParseExact(r.Get("monthlyServiceMonth"), "yyyy-MM", CultureInfo.InvariantCulture, DateTimeStyles.None, out month))
+                            throw new InvalidOperationException("Некорректный период автоматического ежемесячного акта.");
+                        if (r.Get("direction") != "income") throw new InvalidOperationException("Ежемесячный акт обслуживания должен иметь направление «Доход».");
+                    }
                     if (r.Get("workItems") != "")
                     {
                         List<HourlyActLine> lines = GetHourlyActLines(r);
@@ -590,6 +709,8 @@ namespace WorkLedger
             }
             foreach (Record p in rs.Where(r => r.Kind == "payment")) if (AllocatedFrom(rs, p.Id) > Amount(p)) throw new InvalidOperationException("Распределение превышает сумму платежа.");
             foreach (Record c in rs.Where(r => r.Kind == "contract")) if (Amount(c) + rs.Where(r => r.Kind == "amendment" && r.Get("contractId") == c.Id && r.Get("status") == "signed").Sum(r => Amount(r)) < 0) throw new InvalidOperationException("Допсоглашения уменьшают договор ниже нуля.");
+            var monthlyDuplicates = rs.Where(r => r.Kind == "act" && r.Get("serviceGenerated") == "true").GroupBy(r => r.Get("recurringPartyId") + "|" + r.Get("monthlyServiceMonth"));
+            if (monthlyDuplicates.Any(g => g.Count() > 1)) throw new InvalidOperationException("Ежемесячный акт для этого контрагента и месяца уже существует (включая архив и отменённые акты).");
             var duplicates = rs.Where(r => r.Get("number") != "" && r.Get("archived") != "true" && new[] { "contract", "amendment", "estimate", "act", "invoice" }.Contains(r.Kind)).GroupBy(r => r.Kind + "|" + r.Get("partyId") + "|" + r.Get("contractId") + "|" + r.Get("number").ToUpperInvariant());
             if (duplicates.Any(g => g.Count() > 1)) throw new InvalidOperationException("Документ с таким номером уже есть для этого контрагента и договора.");
             if (rs.Count(r => r.Kind == "settings" && r.Get("archived") != "true") > 1) throw new InvalidOperationException("Допускается одна карточка организации.");

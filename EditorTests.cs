@@ -122,7 +122,7 @@ namespace WorkLedger
             {
                 Dictionary<string, Control> inputs = Inputs(editor);
                 TabControl tabs = editor.Controls.OfType<TabControl>().Single();
-                Assert(tabs.TabCount == 5 && inputs["unp"].Text == "", "legacy counterparty sections or defaults changed");
+                Assert(tabs.TabCount == 6 && tabs.TabPages.Cast<TabPage>().Any(t => t.Text == "Обслуживание") && inputs["unp"].Text == "", "legacy counterparty sections or defaults changed");
                 foreach (var pair in organizationValues) if (inputs.ContainsKey(pair.Key)) inputs[pair.Key].Text = pair.Value;
                 inputs["contact"].Text = "Контактное лицо теста";
                 tabs.SelectedIndex = tabs.TabCount - 1;

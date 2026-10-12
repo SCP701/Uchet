@@ -79,6 +79,7 @@ namespace WorkLedger
 
         public static string ValueLabel(FieldDef field, string value)
         {
+            if (field.Type == "bool") return String.Equals(value, "true", StringComparison.OrdinalIgnoreCase) ? "Да" : "Нет";
             string label;
             return field.Options != null && field.Options.TryGetValue(value ?? "", out label) ? label : value;
         }
@@ -146,6 +147,11 @@ namespace WorkLedger
                     S("Контакты", F("website", "Сайт", "text", false)),
                     S("Контакты", F("chiefAccountantName", "Главный бухгалтер", "text", false)),
                     S("Контакты", F("chiefAccountantPhone", "Телефон главного бухгалтера", "text", false)),
+                    S("Обслуживание", F("monthlyServiceEnabled", "Ежемесячное обслуживание", "bool", false)),
+                    S("Обслуживание", F("monthlyServiceAmount", "Сумма за месяц", "money", false)),
+                    S("Обслуживание", E("monthlyServiceCurrency", "Валюта", false, "BYN", "BYN — белорусский рубль", "RUB", "RUB — российский рубль", "USD", "USD — доллар США", "EUR", "EUR — евро")),
+                    S("Обслуживание", F("monthlyServiceDescription", "Наименование работ", "memo", false)),
+                    S("Обслуживание", F("monthlyServiceStartMonth", "Первый акт", "date", false)),
                     S("Прочее", F("requisites", "Реквизиты", "memo", false)),
                     S("Прочее", Notes())),
                 new Schema("project", "Объекты", "Объект",

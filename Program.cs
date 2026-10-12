@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -19,6 +19,7 @@ namespace WorkLedger
             if (dataDir.Length > Path.GetPathRoot(dataDir).Length) dataDir = dataDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
             try
             {
+                if (args.Contains("--generate-monthly-acts")) return MonthlyServiceRuntime.RunBackground(dataDir);
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
                 if (args.Contains("--self-test"))
@@ -35,9 +36,14 @@ namespace WorkLedger
                     UiPreferencesTests.Run(Path.Combine(dataDir, "ui-preferences-tests"));
                     InterfaceUiTests.Run(Path.Combine(dataDir, "interface-ui-tests"));
                     UiStyleTests.Run();
+                    FilterTests.Run(Path.Combine(dataDir, "filter-tests"));
+                    if (MonthlyActCoreTests.Run(Path.Combine(dataDir, "monthly-core-tests")) != 0) throw new Exception("Не прошли проверки ежемесячных актов.");
+                    MonthlyServiceEditorTests.Run(Path.Combine(dataDir, "monthly-editor-tests"));
+                    MonthlyServiceSchedulerTests.Run(Path.Combine(dataDir, "monthly-scheduler-tests"));
+                    MonthlyServiceIntegrationTests.Run(Path.Combine(dataDir, "monthly-integration-tests"));
                     UpdateProtocolTests.Run(Path.Combine(dataDir, "update-protocol-tests"));
                     UpdateManagerTests.Run(Path.Combine(dataDir, "update-manager-tests"));
-                    File.WriteAllText(Path.Combine(dataDir, "test-result.txt"), "PASS: accounting, import/export, backup/restore, UI, hourly acts and numbering, act XLSX/print, personal interface settings and draft preservation, signed update protocol and update settings", Encoding.UTF8);
+                    File.WriteAllText(Path.Combine(dataDir, "test-result.txt"), "PASS: accounting, import/export, backup/restore, UI, hourly acts and numbering, act XLSX/print, personal interface settings and draft preservation, monthly service acts and background scheduler, signed update protocol and update settings", Encoding.UTF8);
                     return 0;
                 }
                 UpdateJob startupJob = null;
@@ -49,14 +55,12 @@ namespace WorkLedger
                 }
                 else if (UpdateManager.IsActiveMarker(Path.GetDirectoryName(Application.ExecutablePath)))
                 { MessageBox.Show("Сейчас устанавливается обновление. Программа откроется автоматически после завершения.", "Обновление"); return 0; }
-                string key;
-                using (var hash = SHA256.Create()) key = BitConverter.ToString(hash.ComputeHash(Encoding.UTF8.GetBytes(dataDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).ToLowerInvariant()))).Replace("-", "");
                 bool first;
-                using (var mutex = new Mutex(true, "Local\\WorkLedger-" + key, out first))
+                using (var mutex = new Mutex(true, MonthlyServiceRuntime.MutexName(dataDir), out first))
                 {
                     if (!first) { MessageBox.Show("Приложение с этой базой уже открыто.", "Акты и оплаты"); return 0; }
                     Application.ThreadException += delegate(object sender, ThreadExceptionEventArgs e) { MessageBox.Show(e.Exception.Message, "Не удалось выполнить действие", MessageBoxButtons.OK, MessageBoxIcon.Warning); };
-                    using (var form = new MainForm(new Store(dataDir)))
+                    using (var form = new MainForm(new Store(dataDir), true))
                     {
                         form.Shown += delegate
                         {
@@ -75,7 +79,7 @@ namespace WorkLedger
             catch (Exception ex)
             {
                 try { Directory.CreateDirectory(dataDir); File.WriteAllText(Path.Combine(dataDir, "error.txt"), ex.ToString(), Encoding.UTF8); } catch { }
-                if (!args.Contains("--self-test")) MessageBox.Show("Не удалось открыть приложение.\n" + ex.Message + "\n\nДанные: " + dataDir, "Акты и оплаты", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                if (!args.Contains("--self-test") && !args.Contains("--generate-monthly-acts")) MessageBox.Show("Не удалось открыть приложение.\n" + ex.Message + "\n\nДанные: " + dataDir, "Акты и оплаты", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return 1;
             }
         }

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Globalization;
@@ -226,6 +226,13 @@ namespace WorkLedger
             {
                 if (field.Required) throw new InvalidOperationException("Обязательное поле не заполнено.");
                 return "";
+            }
+            if (field.Type == "bool")
+            {
+                string boolean = raw.Trim().ToLowerInvariant();
+                if (boolean == "true" || boolean == "да" || boolean == "1") return "true";
+                if (boolean == "false" || boolean == "нет" || boolean == "0") return "false";
+                throw new InvalidOperationException("Укажите Да/Нет, true/false или 1/0.");
             }
             if (field.Type == "ref")
             {

@@ -186,11 +186,11 @@ namespace WorkLedger
                 form.ShowInTaskbar = false; form.Opacity = 0; form.Show(); Application.DoEvents();
                 form.Navigate("party"); Application.DoEvents();
                 var partyTable = (TableData)typeof(MainForm).GetField("table", BindingFlags.NonPublic | BindingFlags.Instance).GetValue(form);
-                Assert(partyTable.Headers.Count == 7 && partyTable.Headers.Contains("УНП") && partyTable.Headers.Last() == "В архиве", "counterparty grid keeps six useful fields plus archive status");
+                Assert(partyTable.Headers.Count == 10 && partyTable.Headers.Contains("Ежемесячное обслуживание") && partyTable.Headers.Contains("Сумма за месяц") && partyTable.Headers.Contains("УНП") && partyTable.Headers.Last() == "В архиве", "counterparty grid keeps original fields, monthly service settings and archive status");
                 foreach (string key in new[] { "name", "role", "phone", "email", "bankAccount" })
                     Assert(partyTable.Headers.Contains(Catalog.Get("party").Fields.Single(f => f.Key == key).Label), "counterparty grid preserves " + key);
                 var customerRow = partyTable.Rows[partyTable.Ids.IndexOf(customer.Id)];
-                Assert(customerRow.Count == 7 && customerRow[partyTable.Headers.IndexOf("УНП")] == "987654321" && customerRow.Contains(customer.Get("name")), "counterparty grid includes correct UNP and existing name");
+                Assert(customerRow.Count == partyTable.Headers.Count && customerRow[partyTable.Headers.IndexOf("УНП")] == "987654321" && customerRow.Contains(customer.Get("name")), "counterparty grid includes correct UNP and existing name");
                 Assert(!partyTable.Headers.Contains("Сайт") && !partyTable.Headers.Contains("Главный бухгалтер") && !partyTable.Headers.Contains("Почтовый адрес"), "counterparty details stay in editor instead of widening the grid");
                 foreach (var schema in Catalog.All.Where(s => s.Kind != "settings")) { form.Navigate(schema.Kind); Application.DoEvents(); }
                 for (int i = 0; i < 6; i++) { form.SelectReport(i); Assert(form.BuildReport().Headers.Count > 0, "report renders " + i); }
