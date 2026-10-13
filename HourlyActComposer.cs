@@ -15,6 +15,7 @@ namespace WorkLedger
             public override string ToString() { return Text; }
         }
         private readonly Store store;
+        private readonly bool externalActs;
         private Record source;
         private readonly ComboBox counterparty = new ComboBox(), contract = new ComboBox(), status = new ComboBox();
         private readonly DateTimePicker date = new DateTimePicker(), due = new DateTimePicker();
@@ -24,12 +25,15 @@ namespace WorkLedger
         private string documentCurrency, documentDirection;
         private bool loading;
         public Record ResultRecord { get; private set; }
+        public bool IsExternal { get { return externalActs; } }
         public DataGridView WorkGrid { get { return works; } }
         public event EventHandler ActSaved;
         public HourlyActComposer(Store store) : this(store, null) { }
-        public HourlyActComposer(Store store, Record existing)
+        public HourlyActComposer(Store store, Record existing) : this(store, existing, false) { }
+        public HourlyActComposer(Store store, Record existing, bool externalActs)
         {
             this.store = store; source = existing == null ? null : existing.Clone();
+            this.externalActs = source == null ? externalActs : Store.IsExternalAct(source);
             Dock = DockStyle.Fill; BackColor = Color.White; Font = new Font("Segoe UI", 10F); Padding = new Padding(16);
             var settings = store.Of("settings").FirstOrDefault();
             documentCurrency = source == null ? (settings == null || settings.Get("currency") == "" ? "BYN" : settings.Get("currency")) : source.Get("currency");
@@ -129,7 +133,8 @@ namespace WorkLedger
         }
         private void RefreshDetails()
         {
-            number.Text = source == null ? "Акт № " + store.NextActNumber + " · номер при сохранении" : "Акт № " + source.Get("number");
+            string actTitle = externalActs ? "Акт вне № " : "Акт № ";
+            number.Text = source == null ? actTitle + store.NextActNumber + " · номер при сохранении" : actTitle + source.Get("number");
             rate.Text = defaultRate > 0 ? defaultRate.ToString("N2") + " " + documentCurrency + " / час" : "Стоимость часа не настроена";
             var own = source == null ? store.Of("settings").FirstOrDefault() : Store.GetActSnapshot(source, "organizationSnapshot");
             var cp = source != null && SelectedId(counterparty) == source.Get("partyId") ? Store.GetActSnapshot(source, "partySnapshot") : store.Find(SelectedId(counterparty));
@@ -176,7 +181,7 @@ namespace WorkLedger
             string partyId = SelectedId(counterparty);
             if (partyId == "") throw new InvalidOperationException("Выберите контрагента.");
             if (defaultRate <= 0) throw new InvalidOperationException("Укажите стоимость часа в «Настройки» → «Создание актов».");
-            Record result = source == null ? store.CreateHourlyActDraft(partyId) : source.Clone();
+            Record result = source == null ? store.CreateHourlyActDraft(partyId, externalActs) : source.Clone();
             result.Set("partyId", partyId); result.Set("date", Store.DateString(date.Value.Date)); result.Set("currency", documentCurrency);
             result.Set("direction", documentDirection); result.Set("contractId", SelectedId(contract));
             Record linked = store.Find(SelectedId(contract));
@@ -211,7 +216,7 @@ namespace WorkLedger
         public Record ResultRecord { get { return Composer.ResultRecord; } }
         public HourlyActEditor(Store store, Record existing)
         {
-            Text = "Изменить акт № " + existing.Get("number"); Font = new Font("Segoe UI", 10F);
+            Text = (Store.IsExternalAct(existing) ? "Изменить акт вне № " : "Изменить акт № ") + existing.Get("number"); Font = new Font("Segoe UI", 10F);
             Width = 1060; Height = 720; MinimumSize = new Size(940, 560); StartPosition = FormStartPosition.CenterParent;
             Composer = new HourlyActComposer(store, existing);
             var footer = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 60, Padding = new Padding(16, 10, 16, 10), FlowDirection = FlowDirection.RightToLeft };

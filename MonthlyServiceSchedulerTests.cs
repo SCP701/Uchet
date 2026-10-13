@@ -1,7 +1,8 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Xml.Linq;
 
@@ -29,6 +30,75 @@ namespace WorkLedger
             }
             public void Delete(string name) { Deletions++; Tasks.Remove(name); }
             public void Dispose() { }
+        }
+        private sealed class NativeStyleTask
+        {
+            internal string Definition;
+            internal Exception ReadError;
+            public string Xml { get { if (ReadError != null) throw ReadError; return Definition; } }
+        }
+        private sealed class NativeStyleFolder
+        {
+            internal readonly Dictionary<string, string> Tasks = new Dictionary<string, string>(StringComparer.Ordinal);
+            internal Exception LookupError, DefinitionError;
+            public object GetTask(string name)
+            {
+                if (LookupError != null) throw LookupError;
+                string xml;
+                if (!Tasks.TryGetValue(name, out xml)) throw new FileNotFoundException("Task is absent before its first registration.");
+                return new NativeStyleTask { Definition = xml, ReadError = DefinitionError };
+            }
+        }
+        private sealed class NativeStyleBackend : MonthlyServiceScheduler.ITaskBackend
+        {
+            internal readonly NativeStyleFolder Folder = new NativeStyleFolder();
+            internal int Registrations, Deletions;
+            public string ReadXml(string name) { return MonthlyServiceScheduler.ReadTaskXml(Folder, name); }
+            public void Register(string name, string xml, string sid) { Registrations++; Folder.Tasks[name] = xml; }
+            public void Delete(string name) { Deletions++; Folder.Tasks.Remove(name); }
+            public void Dispose() { }
+        }
+        private static void TestMappedWindowsErrors(string executable, string dataDir)
+        {
+            NativeStyleBackend backend = new NativeStyleBackend();
+            var result = MonthlyServiceScheduler.EnsureWithBackend(executable, dataDir, true, Sid, backend);
+            Assert(result.Success && result.Changed && backend.Registrations == 1, "first registration failed when Windows mapped missing task to FileNotFoundException");
+            result = MonthlyServiceScheduler.EnsureWithBackend(executable, dataDir, true, Sid, backend);
+            Assert(result.Success && !result.Changed && backend.Registrations == 1, "readback of an existing native-style task caused another registration");
+
+            foreach (Exception absent in new Exception[] {
+                new FileNotFoundException("missing task"), new DirectoryNotFoundException("missing task path"),
+                new COMException("missing task", unchecked((int)0x80070002)), new COMException("missing task path", unchecked((int)0x80070003)),
+                new TargetInvocationException(new FileNotFoundException("wrapped missing task")) })
+            {
+                backend.Folder.LookupError = absent;
+                Assert(backend.ReadXml("missing") == null, "mapped or reflection-wrapped missing task did not return an empty definition");
+            }
+            foreach (Exception failure in new Exception[] { new UnauthorizedAccessException("access denied"), new IOException("scheduler storage error") })
+            {
+                backend.Folder.LookupError = failure;
+                result = MonthlyServiceScheduler.EnsureWithBackend(executable, dataDir, true, Sid, backend);
+                Assert(!result.Success && backend.Registrations == 1, "a lookup failure was swallowed and overwrote an existing task");
+            }
+            backend.Folder.LookupError = null;
+            backend.Folder.DefinitionError = new FileNotFoundException("existing definition could not be read");
+            result = MonthlyServiceScheduler.EnsureWithBackend(executable, dataDir, true, Sid, backend);
+            Assert(!result.Success && backend.Registrations == 1, "an unreadable existing definition was treated as an absent task");
+            backend.Folder.DefinitionError = null;
+            result = MonthlyServiceScheduler.EnsureWithBackend("", dataDir, false, Sid, backend);
+            Assert(result.Success && result.Changed && backend.Deletions == 1, "native-style task could not be disabled");
+            result = MonthlyServiceScheduler.EnsureWithBackend("", dataDir, false, Sid, backend);
+            Assert(result.Success && !result.Changed && backend.Deletions == 1, "disabled absent native-style task was reported as an error");
+        }
+        private static void TestWindowsMissingTaskReadOnly()
+        {
+            Type type = typeof(MonthlyServiceScheduler).GetNestedType("ComTaskBackend", BindingFlags.NonPublic);
+            Assert(type != null, "missing Windows backend");
+            using (IDisposable backend = (IDisposable)Activator.CreateInstance(type))
+            {
+                object definition = type.GetMethod("ReadXml").Invoke(backend, new object[] { "AktiOplaty-MissingProbe-" + Guid.NewGuid().ToString("N") });
+                Assert(definition == null, "real Windows backend failed to read an absent task before registration");
+            }
         }
         [DllImport("shell32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         private static extern IntPtr CommandLineToArgvW(string commandLine, out int count);
@@ -75,6 +145,7 @@ namespace WorkLedger
             Assert(action.Name == Ns + "Exec" && (string)action.Element(Ns + "Command") == executable && (string)action.Element(Ns + "Arguments") == "--generate-monthly-acts --data-dir " + MonthlyServiceScheduler.QuoteArgument(dataDir), "action did not use the direct absolute executable and isolated ledger");
             Assert(!xml.Contains("powershell") && !xml.Contains("cmd.exe"), "scheduler invoked a shell");
 
+            TestMappedWindowsErrors(executable, dataDir);
             FakeBackend backend = new FakeBackend();
             backend.Tasks["unrelated-task"] = "untouched";
             MonthlyServiceScheduler.SchedulerResult result = MonthlyServiceScheduler.EnsureWithBackend(executable, dataDir, true, Sid, backend);
@@ -117,6 +188,8 @@ namespace WorkLedger
             string unavailable;
             bool nativeValidated = MonthlyServiceScheduler.ValidateTaskXmlReadOnly(MonthlyServiceScheduler.BuildTaskXml(executable, dataDir, MonthlyServiceScheduler.CurrentUserSid()), out unavailable);
             File.WriteAllText(Path.Combine(directory, "native-xml-validation.txt"), nativeValidated ? "Windows Task Scheduler accepted XML; no task registered." : "Unavailable: " + unavailable);
+            if (nativeValidated) TestWindowsMissingTaskReadOnly();
+            File.WriteAllText(Path.Combine(directory, "PASS.txt"), "PASS: missing task with mapped Windows HRESULTs; first registration and readback; unchanged definition; disabling; unrelated errors and unreadable definitions preserved; real Windows missing-task lookup is read-only; no Windows task registered.");
         }
     }
 }

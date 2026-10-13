@@ -36,7 +36,7 @@ namespace WorkLedger
             string missingIdentity = "never-saved-" + Guid.NewGuid().ToString("N");
             AssertDefaults(UiPreferences.Load(dataDir, missingIdentity), "missing profile did not restore all visible defaults");
             Assert(!File.Exists(UiPreferences.GetProfilePath(dataDir, missingIdentity)), "reading missing settings wrote a profile");
-            string[] expected = { "overview", "create-act", "party", "project", "contract", "amendment", "estimate", "work", "act", "invoice", "payment", "expense", "hold", "document", "reports", "audit", "updates" };
+            string[] expected = { "overview", "create-act", "party", "project", "contract", "amendment", "estimate", "work", "act", "external-act", "invoice", "payment", "gray-payment", "taxes", "expense", "hold", "document", "reports", "audit", "updates" };
             Assert(expected.SequenceEqual(UiPreferences.Sections.Select(section => section.Key)), "navigation section metadata is missing or reordered");
 
             var first = new UiPreferences { AnimationsEnabled = false };
@@ -96,7 +96,7 @@ namespace WorkLedger
                 Assert(!acts.AnimationsEnabled && dialog.ResultPreferences == null, "selecting a preset changed animations or saved before confirmation");
                 dialog.SelectPreset("acts-payments"); UiPreferences payments = dialog.GetSelectedPreferences();
                 Assert(payments.IsVisible("create-act") && payments.IsVisible("act") && payments.IsVisible("party")
-                    && payments.IsVisible("payment") && payments.IsVisible("invoice") && payments.IsVisible("reports"), "acts and payments preset lacks its required sections");
+                    && payments.IsVisible("payment") && payments.IsVisible("invoice") && payments.IsVisible("taxes") && payments.IsVisible(Catalog.GrayPaymentSection) && payments.IsVisible("reports"), "acts and payments preset lacks its required sections");
                 dialog.SelectPreset("all"); Assert(dialog.GetSelectedPreferences().HiddenSections.Count == 0, "all-sections preset failed to restore a hidden tab");
             }
             Assert(!first.IsVisible("overview") && !first.AnimationsEnabled, "closing interface dialog changed active settings");

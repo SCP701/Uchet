@@ -27,13 +27,14 @@ namespace WorkLedger
     public sealed class Schema
     {
         public string Kind;
+        public string SectionKey;
         public string Title;
         public string Singular;
         public List<FieldDef> Fields;
 
         public Schema(string kind, string title, string singular, params FieldDef[] fields)
         {
-            Kind = kind;
+            Kind = kind; SectionKey = kind;
             Title = title;
             Singular = singular;
             Fields = new List<FieldDef>(fields);
@@ -42,10 +43,24 @@ namespace WorkLedger
 
     public static class Catalog
     {
+        public const string ExternalActSection = "external-act";
+        public const string GrayPaymentSection = "gray-payment";
         public static readonly List<Schema> All = Build();
 
+        public static bool IsActSection(string kind) { return kind == "act" || kind == ExternalActSection; }
+        public static bool IsPaymentSection(string kind) { return kind == "payment" || kind == GrayPaymentSection; }
         public static Schema Get(string kind)
         {
+            if (kind == ExternalActSection)
+            {
+                Schema act = Get("act");
+                return new Schema("act", "Акты вне", "Акт вне", act.Fields.ToArray()) { SectionKey = ExternalActSection };
+            }
+            if (kind == GrayPaymentSection)
+            {
+                Schema payment = Get("payment");
+                return new Schema("payment", "Серые оплаты", "Серая оплата", payment.Fields.ToArray()) { SectionKey = GrayPaymentSection };
+            }
             Schema schema = All.FirstOrDefault(delegate(Schema s) { return s.Kind == kind; });
             return schema;
         }
@@ -69,7 +84,7 @@ namespace WorkLedger
             {
                 Schema schema = All.FirstOrDefault(delegate(Schema s) { return s.Kind == record.Kind; });
                 string number = record.Get("number");
-                title = (schema == null ? "Запись" : schema.Singular) +
+                title = (Store.IsExternalAct(record) ? "Акт вне" : record.Kind == "payment" && record.Get("paymentScope") == "external" ? "Серая оплата" : schema == null ? "Запись" : schema.Singular) +
                     (String.IsNullOrWhiteSpace(number) ? " от " + record.Get("date") : " № " + number);
             }
             if (String.IsNullOrWhiteSpace(title)) title = "Без названия";
@@ -180,7 +195,9 @@ namespace WorkLedger
                     Amount(), Currency(), Direction(), DueDate(),
                     E("status", "Статус", true, "draft", "Черновик", "sent", "Выставлен", "cancelled", "Отменён"), Notes()),
                 new Schema("payment", "Оплаты и авансы", "Платёж",
-                    F("number", "Номер документа", "text", false), Date(), Party(true), Project(false), Contract(false),
+                    F("number", "Номер документа", "text", false), Date(),
+                    E("paymentScope", "Вид оплаты", false, "standard", "Белая", "external", "Серая (Акты вне)", "", "По актам и распределениям"),
+                    R("actId", "Акт", "act", false), Party(true), Project(false), Contract(false),
                     Direction(), Amount(), Currency(), E("method", "Способ оплаты", true, "bank", "Банк", "cash", "Наличные", "other", "Другое"), Notes()),
                 new Schema("expense", "Расходы", "Расход",
                     Date(), Party(false), Project(true),

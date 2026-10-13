@@ -245,18 +245,7 @@ namespace WorkLedger
                 }
                 catch { Dispose(); throw; }
             }
-            public string ReadXml(string taskName)
-            {
-                object task = null;
-                try { task = Invoke(folder, "GetTask", taskName); return (string)Get(task, "Xml"); }
-                catch (Exception error)
-                {
-                    COMException cause = Unwrap(error) as COMException;
-                    if (cause != null && (cause.ErrorCode == unchecked((int)0x80070002) || cause.ErrorCode == unchecked((int)0x80070003))) return null;
-                    throw;
-                }
-                finally { Release(task); }
-            }
+            public string ReadXml(string taskName) { return ReadTaskXml(folder, taskName); }
             public void Register(string taskName, string xml, string sid)
             {
                 object task = null;
@@ -265,6 +254,25 @@ namespace WorkLedger
             }
             public void Delete(string taskName) { Invoke(folder, "DeleteTask", taskName, 0); }
             public void Dispose() { Release(folder); folder = null; Release(service); service = null; }
+        }
+        internal static string ReadTaskXml(object taskFolder, string taskName)
+        {
+            object task = null;
+            try
+            {
+                try { task = Invoke(taskFolder, "GetTask", taskName); }
+                catch (Exception error)
+                {
+                    // CLR maps these Windows HRESULTs to FileNotFoundException / DirectoryNotFoundException,
+                    // as well as COMException. A missing task is normal before the first registration.
+                    int code = Unwrap(error).HResult;
+                    if (code == unchecked((int)0x80070002) || code == unchecked((int)0x80070003)) return null;
+                    throw;
+                }
+                // A failure reading an existing definition must not be treated as an absent task.
+                return (string)Get(task, "Xml");
+            }
+            finally { Release(task); }
         }
         private static object Invoke(object target, string member, params object[] args)
         {

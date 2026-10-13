@@ -21,6 +21,8 @@ namespace WorkLedger
         private readonly Schema schema;
         private readonly Record source;
         private readonly Dictionary<string, Control> inputs = new Dictionary<string, Control>();
+        private readonly Dictionary<string, Label> fieldLabels = new Dictionary<string, Label>();
+        private Label paymentTitle;
         private readonly ErrorProvider errors = new ErrorProvider();
         private readonly ToolTip tips = new ToolTip();
         private readonly Label hint;
@@ -38,6 +40,8 @@ namespace WorkLedger
                 ? new Record { Id = Guid.NewGuid().ToString("N"), Kind = schema.Kind }
                 : existing.Clone();
             if (source.Fields == null) source.Fields = new Dictionary<string, string>();
+            if (schema.Kind == "payment" && store.Find(source.Id) == null && !source.Fields.ContainsKey("paymentScope"))
+                source.Set("paymentScope", schema.SectionKey == Catalog.GrayPaymentSection ? "external" : "standard");
             Text = (existing == null || store.Find(existing.Id) == null ? "Добавить: " : "Изменить: ") + schema.Singular;
             Font = new Font("Segoe UI", 10F);
             BackColor = Color.FromArgb(247, 249, 252);
@@ -68,6 +72,7 @@ namespace WorkLedger
                 Dock = DockStyle.Bottom, Height = 36, Padding = new Padding(25, 0, 20, 0),
                 ForeColor = Color.FromArgb(100, 116, 139)
             };
+            if (schema.Kind == "payment") paymentTitle = title;
             header.Controls.Add(subtitle);
             header.Controls.Add(title);
 
@@ -86,7 +91,7 @@ namespace WorkLedger
             else content = BuildFields(schema.Fields);
             WireRelatedReferences();
             WireMonthlyService();
-            Panel footer = new Panel { Dock = DockStyle.Bottom, Height = 83, BackColor = Color.White, Padding = new Padding(24, 15, 24, 15) };
+            Panel footer = new Panel { Dock = DockStyle.Bottom, Height = schema.Kind == "payment" ? 101 : 83, BackColor = Color.White, Padding = new Padding(24, 15, 24, 15) };
             FlowLayoutPanel buttons = new FlowLayoutPanel
             {
                 Dock = DockStyle.Right, Width = 252, FlowDirection = FlowDirection.RightToLeft,
@@ -118,6 +123,7 @@ namespace WorkLedger
             Controls.Add(content);
             Controls.Add(footer);
             Controls.Add(header);
+            WirePaymentFields();
             UiStyle.ApplyTo(this); UiStyle.SetAnimations(this, UiPreferences.Load(store.DataDir).AnimationsEnabled);
             AcceptButton = save;
             CancelButton = cancel;
@@ -145,6 +151,7 @@ namespace WorkLedger
                     AutoSize = true, Anchor = AnchorStyles.Left | AnchorStyles.Top,
                     Margin = new Padding(0, 8, 12, 15), MaximumSize = new Size(207, 0)
                 };
+                fieldLabels[field.Key] = label;
                 Control input = MakeInput(field);
                 input.Dock = DockStyle.Fill;
                 input.Margin = new Padding(0, 3, 16, 14);
@@ -219,7 +226,8 @@ namespace WorkLedger
 
         private void WireRelatedReferences()
         {
-            if (store.Find(source.Id) != null) return;
+            bool saved = store.Find(source.Id) != null;
+            if (saved && schema.Kind != "payment") return;
             foreach (string reference in new[] { "contractId", "actId" })
             {
                 Control input;
@@ -231,8 +239,11 @@ namespace WorkLedger
                 };
                 tips.SetToolTip(input, "При выборе договора или акта связанные поля подставляются автоматически.");
             }
-            if (source.Get("actId") != "") ApplyRelatedReference("actId");
-            else if (source.Get("contractId") != "") ApplyRelatedReference("contractId");
+            if (!saved)
+            {
+                if (source.Get("actId") != "") ApplyRelatedReference("actId");
+                else if (source.Get("contractId") != "") ApplyRelatedReference("contractId");
+            }
         }
 
         private void ApplyRelatedReference(string referenceKey)
@@ -253,7 +264,7 @@ namespace WorkLedger
                 {
                     string value = linked.Get(key);
                     Control target;
-                    if (value == "" || !inputs.TryGetValue(key, out target) || !(target is ComboBox)) continue;
+                    if (value == "" && !(schema.Kind == "payment" && referenceKey == "actId") || !inputs.TryGetValue(key, out target) || !(target is ComboBox)) continue;
                     ComboBox combo = (ComboBox)target;
                     for (int i = 0; i < combo.Items.Count; ++i)
                         if (((Choice)combo.Items[i]).Value == value) { combo.SelectedIndex = i; break; }
@@ -304,14 +315,14 @@ namespace WorkLedger
                     DropDownStyle = ComboBoxStyle.DropDownList, IntegralHeight = false,
                     MaxDropDownItems = 12, DropDownHeight = 320, Height = 31
                 };
-                if (!field.Required || field.Type == "ref") combo.Items.Add(new Choice("", "— Не выбрано —"));
+                if (field.Type == "ref" || !field.Required && !field.Options.ContainsKey("")) combo.Items.Add(new Choice("", "— Не выбрано —"));
                 if (field.Type == "enum")
                     foreach (KeyValuePair<string, string> option in field.Options)
                         combo.Items.Add(new Choice(option.Key, option.Value));
                 else
                 {
-                    foreach (Record record in store.Records.Where(delegate(Record r) { return r.Kind == field.ReferenceKind; })
-                        .Where(delegate(Record r) { return r.Get("archived") != "true" || r.Id == value; })
+                    foreach (Record record in store.Records.Where(delegate(Record r) { return r.Kind == field.ReferenceKind && (!IsPaymentActField(field) || PaymentActAllowed(r)); })
+                        .Where(delegate(Record r) { return r.Get("archived") != "true" || r.Id == value && (!IsPaymentActField(field) || store.Find(source.Id) != null); })
                         .OrderBy(delegate(Record r) { return Catalog.Display(store, r); }, StringComparer.CurrentCultureIgnoreCase))
                         combo.Items.Add(new Choice(record.Id, Catalog.Display(store, record)));
                 }
@@ -355,6 +366,66 @@ namespace WorkLedger
             return text;
         }
 
+        private bool IsPaymentActField(FieldDef field) { return schema.Kind == "payment" && field.Key == "actId"; }
+        private string SelectedPaymentScope
+        {
+            get
+            {
+                Control control;
+                if (inputs.TryGetValue("paymentScope", out control))
+                {
+                    Choice selected = ((ComboBox)control).SelectedItem as Choice;
+                    return selected == null ? "" : selected.Value;
+                }
+                return source.Get("paymentScope");
+            }
+        }
+        private bool PaymentActAllowed(Record act)
+        {
+            string scope = SelectedPaymentScope;
+            return scope == "" || (scope == "external" ? Store.IsExternalAct(act) : !Store.IsExternalAct(act));
+        }
+        private void RefillPaymentActs()
+        {
+            ComboBox combo = (ComboBox)inputs["actId"];
+            Choice previous = combo.SelectedItem as Choice; string selected = previous == null ? source.Get("actId") : previous.Value;
+            bool saved = store.Find(source.Id) != null;
+            autoSelecting = true;
+            try
+            {
+                combo.Items.Clear(); combo.Items.Add(new Choice("", "— Не выбрано —"));
+                foreach (Record act in store.Records.Where(r => r.Kind == "act" && PaymentActAllowed(r)
+                    && (r.Get("archived") != "true" || saved && r.Id == source.Get("actId")))
+                    .OrderBy(r => Catalog.Display(store, r), StringComparer.CurrentCultureIgnoreCase))
+                    combo.Items.Add(new Choice(act.Id, Catalog.Display(store, act)));
+                combo.SelectedIndex = 0;
+                for (int i = 0; i < combo.Items.Count; i++) if (((Choice)combo.Items[i]).Value == selected) { combo.SelectedIndex = i; break; }
+            }
+            finally { autoSelecting = false; }
+        }
+        private void WirePaymentFields()
+        {
+            if (schema.Kind != "payment") return;
+            ((ComboBox)inputs["paymentScope"]).SelectedIndexChanged += delegate
+            {
+                if (autoSelecting) return;
+                RefillPaymentActs(); UpdatePaymentHint(); errors.SetError(inputs["actId"], "");
+            };
+            RefillPaymentActs(); UpdatePaymentHint();
+        }
+        private void UpdatePaymentHint()
+        {
+            string scope = SelectedPaymentScope;
+            string singular = scope == "external" ? "Серая оплата" : scope == "standard" ? "Белая оплата" : "Платёж";
+            Text = (store.Find(source.Id) == null ? "Добавить: " : "Изменить: ") + singular;
+            if (paymentTitle != null) paymentTitle.Text = Text;
+            fieldLabels["actId"].Text = scope == "external" ? "Акт вне *" : "Акт";
+            hint.Text = scope == "external"
+                ? "Серая оплата не входит в расчёт налога. Для погашения долга используйте «Зачесть оплату»."
+                : scope == "standard" ? "В налоговом расчёте учитываются белые поступления. Для погашения долга используйте «Зачесть оплату»."
+                : "Вид оплаты определяется актом и распределениями. Для погашения долга используйте «Зачесть оплату».";
+        }
+
         private static bool TryDecimal(string value, out decimal result)
         {
             string normalized = (value ?? "").Trim().Replace(" ", "").Replace("\u00A0", "").Replace("\u202F", "").Replace(',', '.');
@@ -390,7 +461,8 @@ namespace WorkLedger
                 }
                 else value = input.Text.Trim();
                 string error = "";
-                if ((field.Required || monthlyServiceEnabled && IsRequiredMonthlyServiceField(field.Key)) && String.IsNullOrWhiteSpace(value))
+                if ((field.Required || monthlyServiceEnabled && IsRequiredMonthlyServiceField(field.Key)
+                    || IsPaymentActField(field) && SelectedPaymentScope == "external") && String.IsNullOrWhiteSpace(value))
                     error = "Заполните поле «" + field.Label + "».";
                 if (field.Key == "monthlyServiceDescription" && String.IsNullOrWhiteSpace(value))
                     value = "Ежемесячное обслуживание";

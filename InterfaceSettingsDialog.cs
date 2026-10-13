@@ -103,7 +103,7 @@ namespace WorkLedger
         {
             string[] visible;
             if (key == "acts") visible = new[] { "create-act", "party", "act" };
-            else if (key == "acts-payments") visible = new[] { "overview", "create-act", "party", "project", "contract", "act", "invoice", "payment", "reports" };
+            else if (key == "acts-payments") visible = new[] { "overview", "create-act", "party", "project", "contract", "act", "invoice", "payment", Catalog.GrayPaymentSection, "taxes", "reports" };
             else if (key == "all") visible = UiPreferences.Sections.Select(section => section.Key).ToArray();
             else throw new ArgumentException("Неизвестный набор разделов.", "key");
             var selected = new HashSet<string>(visible, StringComparer.Ordinal);

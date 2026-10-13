@@ -34,17 +34,25 @@ namespace WorkLedger
                     ActItemsEditorTests.Run(Path.Combine(dataDir, "act-items-tests"));
                     ActDocumentTests.Run(Path.Combine(dataDir, "act-document-tests"));
                     ActHtmlDocumentTests.Run(Path.Combine(dataDir, "act-html-tests"));
+                    PaymentAccountingTests.Run(Path.Combine(dataDir, "payment-scope-core-tests"));
+                    GrayPaymentEditorTests.Run(Path.Combine(dataDir, "gray-payment-editor-tests"));
+                    GrayPaymentIntegrationTests.Run(Path.Combine(dataDir, "gray-payment-integration-tests"));
+                    QuarterlyTaxesTests.Run(Path.Combine(dataDir, "quarter-tax-core-tests"));
+                    QuarterlyTaxesPageTests.Run(Path.Combine(dataDir, "quarter-tax-page-tests"));
+                    QuarterlyTaxesIntegrationTests.Run(Path.Combine(dataDir, "quarter-tax-integration-tests"));
                     UiPreferencesTests.Run(Path.Combine(dataDir, "ui-preferences-tests"));
                     InterfaceUiTests.Run(Path.Combine(dataDir, "interface-ui-tests"));
                     UiStyleTests.Run();
                     FilterTests.Run(Path.Combine(dataDir, "filter-tests"));
+                    if (ExternalActCoreTests.Run(Path.Combine(dataDir, "external-act-core-tests")) != 0) throw new Exception("Не прошли проверки актов вне.");
+                    ExternalActIntegrationTests.Run(Path.Combine(dataDir, "external-act-integration-tests"));
                     if (MonthlyActCoreTests.Run(Path.Combine(dataDir, "monthly-core-tests")) != 0) throw new Exception("Не прошли проверки ежемесячных актов.");
                     MonthlyServiceEditorTests.Run(Path.Combine(dataDir, "monthly-editor-tests"));
                     MonthlyServiceSchedulerTests.Run(Path.Combine(dataDir, "monthly-scheduler-tests"));
                     MonthlyServiceIntegrationTests.Run(Path.Combine(dataDir, "monthly-integration-tests"));
                     UpdateProtocolTests.Run(Path.Combine(dataDir, "update-protocol-tests"));
                     UpdateManagerTests.Run(Path.Combine(dataDir, "update-manager-tests"));
-                    File.WriteAllText(Path.Combine(dataDir, "test-result.txt"), "PASS: accounting, import/export, backup/restore, UI, hourly acts and numbering, act XLSX/print, personal interface settings and draft preservation, monthly service acts and background scheduler, signed update protocol and update settings", Encoding.UTF8);
+                    File.WriteAllText(Path.Combine(dataDir, "test-result.txt"), "PASS: accounting, import/export, backup/restore, UI, hourly acts and numbering, act XLSX/print, personal interface settings and draft preservation, monthly service acts and background scheduler, external acts, tax selection and transfers, quarterly taxes, grey and white payment parts, SR total, signed update protocol and update settings", Encoding.UTF8);
                     return 0;
                 }
                 UpdateJob startupJob = null;

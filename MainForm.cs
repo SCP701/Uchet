@@ -40,6 +40,10 @@ namespace WorkLedger
         private Panel overview = new Panel();
         private FlowLayoutPanel filters;
         private HourlyActComposer composer;
+        private readonly Dictionary<string, HourlyActComposer> actComposers = new Dictionary<string, HourlyActComposer>();
+        private const string CreateExternalActSection = "create-external-act";
+        private QuarterlyTaxesPage taxesPage;
+        private PaymentAccounting viewPaymentAccounting;
         private System.Windows.Forms.Button updatesButton;
         private UiPreferences interfacePreferences;
         private readonly ViewTransition viewTransition = new ViewTransition();
@@ -61,7 +65,7 @@ namespace WorkLedger
             brand.Controls.Add(new Label { Text = "Работы, документы и расчёты", Left = 9, Top = 52, Width = 208, Height = 24, ForeColor = Color.FromArgb(150, 169, 191), Font = new Font("Segoe UI", 8.5F) });
             var local = new Label { Text = Environment.UserName + "\r\nПерсональный интерфейс", Dock = DockStyle.Bottom, Height = 46, ForeColor = Color.FromArgb(150, 169, 191), Font = new Font("Segoe UI", 8.5F), Padding = new Padding(8, 7, 0, 0) };
             nav.Dock = DockStyle.Fill; nav.FlowDirection = FlowDirection.TopDown; nav.WrapContents = false; nav.AutoScroll = true; nav.BackColor = UiStyle.Sidebar;
-            nav.SizeChanged += delegate { FitNavigation(); };
+            nav.SizeChanged += delegate { FitNavigation(); QueueActiveNavigationVisibility(); };
             sidebar.Controls.Add(nav); sidebar.Controls.Add(brand); sidebar.Controls.Add(local); Controls.Add(sidebar);
             string lastGroup = "";
             foreach (var section in UiPreferences.Sections)
@@ -132,7 +136,7 @@ namespace WorkLedger
                 boundary.CloseUp += delegate { DateBoundaryStateChanged(); };
             }
             report.Width = 285; report.DropDownStyle = ComboBoxStyle.DropDownList;
-            report.Items.AddRange(new object[] { "Задолженность по актам", "Прибыль по объектам", "Сверка с контрагентом", "Выполнение договоров", "Движение денег", "Документы и сроки" });
+            report.Items.AddRange(new object[] { "Задолженность по актам", "Прибыль по объектам", "Сверка с контрагентом", "Выполнение договоров", "Движение денег", "Документы и сроки", "Акты для налогового учёта" });
             report.SelectedIndex = 0; report.SelectedIndexChanged += delegate { ConfigureFilters(false); RefreshView(); };
             grid.Dock = DockStyle.Fill; grid.ReadOnly = true; grid.AllowUserToAddRows = false; grid.AllowUserToDeleteRows = false;
             grid.RowHeadersVisible = false; grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect; grid.MultiSelect = false;
@@ -233,19 +237,37 @@ namespace WorkLedger
         private UiButton NewNavButton(string key, string text)
         {
             return new UiButton { Text = text, Tag = key, Width = 202, Height = 36, TextAlign = ContentAlignment.MiddleLeft,
-                Navigation = true, IconKey = key, AnimationsEnabled = interfacePreferences.AnimationsEnabled,
+                Navigation = true, IconKey = Catalog.IsActSection(key) ? "act" : Catalog.IsPaymentSection(key) ? "payment" : key, AnimationsEnabled = interfacePreferences.AnimationsEnabled,
                 BackColor = UiStyle.Sidebar, ForeColor = Color.FromArgb(202, 214, 230), Margin = new Padding(0, 0, 0, 2) };
         }
         private void AddNav(string kind, string label)
         {
             var b = NewNavButton(kind, label);
-            b.Click += delegate { Guard(delegate { if (kind == "act") ShowAllActs(); else Navigate(kind); }); }; nav.Controls.Add(b);
+            b.Click += delegate { Guard(delegate { if (Catalog.IsActSection(kind)) ShowAllActs(kind == Catalog.ExternalActSection); else Navigate(kind); }); }; nav.Controls.Add(b);
         }
         private void AddNavGroup(string group)
         {
             nav.Controls.Add(new Label { Text = group.ToUpperInvariant(), Width = 202, Height = 21, AutoSize = false,
                 Font = new Font("Segoe UI", 8, FontStyle.Bold), ForeColor = Color.FromArgb(128, 151, 178),
                 Padding = new Padding(10, 0, 0, 0), Margin = new Padding(0, 13, 0, 3), Tag = "nav-group:" + group });
+        }
+        private bool navigationScrollQueued;
+        private void QueueActiveNavigationVisibility()
+        {
+            if (!IsHandleCreated || IsDisposed || navigationScrollQueued) return;
+            navigationScrollQueued = true;
+            try
+            {
+                BeginInvoke((MethodInvoker)delegate
+                {
+                    navigationScrollQueued = false;
+                    if (IsDisposed || nav.IsDisposed) return;
+                    nav.PerformLayout();
+                    var selected = nav.Controls.OfType<UiButton>().FirstOrDefault(button => button.Selected);
+                    if (selected != null) nav.ScrollControlIntoView(selected);
+                });
+            }
+            catch (InvalidOperationException) { navigationScrollQueued = false; }
         }
         private bool fittingNavigation;
         private void FitNavigation()
@@ -283,7 +305,7 @@ namespace WorkLedger
                 else if (UiPreferences.Sections.Any(s => s.Key == key)) item.Visible = interfacePreferences.IsVisible(key);
             }
             nav.ResumeLayout(true); FitNavigation(); UiStyle.SetAnimations(this, interfacePreferences.AnimationsEnabled);
-            if (!interfacePreferences.IsVisible(current)) Navigate(FirstVisibleSection());
+            if (!interfacePreferences.IsVisible(PreferenceSection(current))) Navigate(FirstVisibleSection());
             Invalidate(true);
         }
         public void OpenInterfaceSettings()
@@ -331,7 +353,7 @@ namespace WorkLedger
         }
         private bool FilterAvailable(string key)
         {
-            if (current == "create-act") return false;
+            if (IsActComposerSection(current) || current == "taxes") return false;
             if (current == "overview") return key == "currency";
             if (current == "audit") return key == "search" || key == "dates" || key == "reset";
             if (key == "search" || key == "reset") return true;
@@ -342,7 +364,7 @@ namespace WorkLedger
             if (key == "status")
             {
                 var schema = Catalog.Get(current);
-                return current == "payment" || (schema != null && schema.Fields.Any(f => f.Key == "status" || f.Key == "role"));
+                return Catalog.IsPaymentSection(current) || (schema != null && schema.Fields.Any(f => f.Key == "status" || f.Key == "role"));
             }
             return false;
         }
@@ -364,12 +386,12 @@ namespace WorkLedger
                     var schema = Catalog.Get(current);
                     var field = schema == null ? null : schema.Fields.FirstOrDefault(f => f.Key == "status" || f.Key == "role");
                     if (field != null) foreach (var option in field.Options) status.Items.Add(new Choice(option.Key, option.Value));
-                    if (current == "act")
+                    if (Catalog.IsActSection(current))
                     {
                         status.Items.Add(new Choice("due", "Есть долг к оплате")); status.Items.Add(new Choice("overdue", "Просроченные"));
                         status.Items.Add(new Choice("paid", "Оплаченные")); status.Items.Add(new Choice("held", "Только удержания"));
                     }
-                    if (current == "payment") { status.Items.Add(new Choice("advance", "Есть незачтённый аванс")); status.Items.Add(new Choice("allocated", "Полностью зачтены")); }
+                    if (Catalog.IsPaymentSection(current)) { status.Items.Add(new Choice("advance", "Есть незачтённый аванс")); status.Items.Add(new Choice("allocated", "Полностью зачтены")); }
                     status.SelectedIndex = 0;
                 }
                 foreach (Control group in filters.Controls)
@@ -433,7 +455,7 @@ namespace WorkLedger
             var schema = Catalog.Get(current);
             if (schema != null) return schema.Fields.Any(f => f.Type == "date" && f.Label == header);
             if (current == "audit") return header == "Дата и время";
-            return current == "reports" && (header == "Дата" || header == "Срок" || header == "Срок / дата");
+            return current == "reports" && (header == "Дата" || header == "Дата подписания" || header == "Срок" || header == "Срок / дата");
         }
         private static bool TryGridDate(object value, out DateTime date)
         {
@@ -475,19 +497,21 @@ namespace WorkLedger
         {
             string previous = current; viewTransition.Cancel(); current = kind;
             ConfigureFilters(true);
-            foreach (var button in nav.Controls.OfType<UiButton>()) button.Selected = Convert.ToString(button.Tag) == kind;
+            foreach (var button in nav.Controls.OfType<UiButton>()) button.Selected = Convert.ToString(button.Tag) == PreferenceSection(kind);
+            foreach (var pending in actComposers.Values) pending.Visible = false;
             foreach (Control action in actions.Controls.Cast<Control>().ToList())
                 if (Object.ReferenceEquals(action, report)) actions.Controls.Remove(action); else action.Dispose();
             actions.Controls.Clear();
-            if (kind == "create-act")
+            if (IsActComposerSection(kind))
             {
-                if (composer == null)
+                if (!actComposers.TryGetValue(kind, out composer))
                 {
-                    composer = new HourlyActComposer(store);
-                    composer.ActSaved += delegate
+                    var newComposer = new HourlyActComposer(store, null, kind == CreateExternalActSection);
+                    composer = newComposer; actComposers.Add(kind, newComposer);
+                    newComposer.ActSaved += delegate
                     {
-                        var savedComposer = composer; FocusRecord(savedComposer.ResultRecord);
-                        body.Controls.Remove(savedComposer); composer = null; savedComposer.Dispose();
+                        actComposers.Remove(kind); FocusRecord(newComposer.ResultRecord);
+                        body.Controls.Remove(newComposer); if (Object.ReferenceEquals(composer, newComposer)) composer = null; newComposer.Dispose();
                     };
                     UiStyle.ApplyTo(composer); UiStyle.SetAnimations(composer, interfacePreferences.AnimationsEnabled); body.Controls.Add(composer); composer.BringToFront();
                 }
@@ -495,23 +519,28 @@ namespace WorkLedger
                 actions.Controls.Add(Button("Сохранить акт", delegate { composer.SaveDraft(); }));
                 actions.Controls.Add(Button("Предпросмотр", PreviewAct));
                 actions.Controls.Add(Button("Настроить стоимость часа", Settings));
-                actions.Controls.Add(Button("Все акты", ShowAllActs));
+                actions.Controls.Add(Button(kind == CreateExternalActSection ? "Все акты вне" : "Все акты", delegate { ShowAllActs(kind == CreateExternalActSection); }));
+            }
+            else if (kind == "taxes")
+            {
+                EnsureTaxesPage();
+                taxesPage.Visible = true;
             }
             else if (Catalog.Get(kind) != null && kind != "settings")
             {
                 actions.Controls.Add(Button("+ Добавить", Add)); actions.Controls.Add(Button("Изменить", Edit));
                 actions.Controls.Add(Button("В архив / вернуть", Archive));
-                if (kind == "act" || kind == "payment") actions.Controls.Add(Button("Зачесть оплату", Allocate));
+                if (Catalog.IsActSection(kind) || Catalog.IsPaymentSection(kind)) actions.Controls.Add(Button("Зачесть оплату", Allocate));
                 if (kind == "estimate") actions.Controls.Add(Button("Создать акт", CreateAct));
-                if (kind == "act")
+                if (Catalog.IsActSection(kind))
                 {
                     actions.Controls.Add(Button("Позиции акта", EditActItems));
                     actions.Controls.Add(Button("Акт Word", ExportActWord));
                     actions.Controls.Add(Button("Создать счёт", CreateInvoice));
                     actions.Controls.Add(Button("Акт в Excel", ExportActDocument));
-                    actions.Controls.Add(Button("Все акты", ShowAllActs));
+                    actions.Controls.Add(Button(kind == Catalog.ExternalActSection ? "Все акты вне" : "Все акты", delegate { ShowAllActs(kind == Catalog.ExternalActSection); }));
                 }
-                if (kind == "act" || kind == "invoice" || kind == "estimate" || kind == "contract") actions.Controls.Add(Button("Печатная форма", PrintDocument));
+                if (Catalog.IsActSection(kind) || kind == "invoice" || kind == "estimate" || kind == "contract") actions.Controls.Add(Button("Печатная форма", PrintDocument));
                 if (kind != "work" && kind != "hold" && kind != "amendment") actions.Controls.Add(Button("Прикрепить файл", Attach));
                 if (kind == "document") actions.Controls.Add(Button("Открыть файл", OpenAttachment));
                 actions.Controls.Add(Button("Excel / CSV", Export)); actions.Controls.Add(Button("Импорт", Import));
@@ -522,20 +551,53 @@ namespace WorkLedger
             }
             else if (kind == "audit") actions.Controls.Add(Button("Выгрузить Excel", Export));
             else { actions.Controls.Add(Button("+ Новый акт", delegate { Navigate("create-act"); })); actions.Controls.Add(Button("+ Оплата", delegate { Navigate("payment"); Add(); })); actions.Controls.Add(Button("Отчёты", delegate { Navigate("reports"); })); }
-            title.Text = kind == "create-act" ? "Создать акт" : kind == "overview" ? "Обзор" : kind == "reports" ? "Отчёты и сверка" : kind == "audit" ? "История изменений" : Catalog.Get(kind).Title;
-            hint.Text = kind == "create-act" ? "Выберите контрагента, впишите работы и часы. Номер и сумма рассчитываются автоматически." : kind == "overview" ? "Показатели за всё время в выбранной валюте. Напоминания — на ближайшие 7 дней."
+            title.Text = IsActComposerSection(kind) ? (kind == CreateExternalActSection ? "Создать акт вне" : "Создать акт") : kind == "overview" ? "Обзор" : kind == "reports" ? "Отчёты и сверка" : kind == "audit" ? "История изменений" : kind == "taxes" ? "Налоги" : Catalog.Get(kind).Title;
+            hint.Text = kind == CreateExternalActSection ? "Акт войдёт в общий учёт и сверку, вне выборки «Акты для налогового учёта»." : kind == "create-act" ? "Выберите контрагента, впишите работы и часы. Номер и сумма рассчитываются автоматически." : kind == "overview" ? "Показатели за всё время в выбранной валюте. Напоминания — на ближайшие 7 дней."
                 : kind == "expense" ? "Дополнительные затраты. Работы подрядчиков учитывайте актами, чтобы не посчитать расход дважды."
-                : kind == "payment" ? "Незачтённая часть платежа остаётся авансом. Кнопка «Зачесть оплату» связывает его с актами."
+                : kind == Catalog.GrayPaymentSection ? "Оплаты по «Актам вне», без налогов. «Зачесть оплату» уменьшает долг по акту."
+                : kind == "payment" ? "Белые оплаты и авансы. Кнопка «Зачесть оплату» связывает их с обычными актами."
+                : kind == Catalog.ExternalActSection ? "Акты вне входят в общий учёт и сверку, вне выборки «Акты для налогового учёта»."
                 : kind == "act" ? "В задолженность входят подписанные акты. Удержания показываются отдельно от суммы к оплате."
+                : kind == "taxes" ? "Белые поступления по датам оплат за квартал. Налог — 20%; серые оплаты исключены."
                 : kind == "reports" ? "Прибыль считается по подписанным актам и расходам. Движение денег — по платежам."
                 : kind == "work" ? "Добавьте позиции к смете. Сумма рассчитывается из количества и цены."
                 : "Поиск, контрагент, направление, валюта и даты помогают найти нужные записи.";
-            overview.Visible = kind == "overview"; grid.Visible = kind != "overview" && kind != "create-act";
-            if (composer != null) composer.Visible = kind == "create-act";
-            filters.Visible = count.Visible = kind != "create-act";
+            overview.Visible = kind == "overview"; grid.Visible = kind != "overview" && !IsActComposerSection(kind) && kind != "taxes";
+            if (taxesPage != null) taxesPage.Visible = kind == "taxes";
+            actions.Visible = kind != "taxes";
+            if (composer != null) composer.Visible = IsActComposerSection(kind);
+            filters.Visible = count.Visible = !IsActComposerSection(kind) && kind != "taxes";
             ConfigureFilters(false);
             RefreshView();
-            if (previous != kind) viewTransition.Begin(kind == "create-act" ? (Control)composer : kind == "overview" ? (Control)overview : grid, interfacePreferences.AnimationsEnabled);
+            if (previous != kind) viewTransition.Begin(IsActComposerSection(kind) ? (Control)composer : kind == "overview" ? (Control)overview : kind == "taxes" ? (Control)taxesPage : grid, interfacePreferences.AnimationsEnabled);
+            QueueActiveNavigationVisibility();
+        }
+        private static bool IsActComposerSection(string key) { return key == "create-act" || key == CreateExternalActSection; }
+        private static string PreferenceSection(string key) { return key == CreateExternalActSection ? Catalog.ExternalActSection : key; }
+        private bool MatchesCurrentSection(Record record)
+        {
+            if (Catalog.IsActSection(current)) return record.Kind == "act" && Store.IsExternalAct(record) == (current == Catalog.ExternalActSection);
+            if (Catalog.IsPaymentSection(current))
+            {
+                if (record.Kind != "payment") return false;
+                PaymentSplit parts = ViewPaymentParts(record);
+                return current == Catalog.GrayPaymentSection ? parts.GreyAmount > 0 : parts.WhiteAmount > 0;
+            }
+            return record.Kind == current;
+        }
+        private PaymentSplit ViewPaymentParts(Record payment)
+        {
+            return (viewPaymentAccounting ?? PaymentAccounting.Build(store.Records)).For(payment);
+        }
+        internal string SectionForRecord(Record record)
+        {
+            if (Store.IsExternalAct(record)) return Catalog.ExternalActSection;
+            if (record.Kind == "payment")
+            {
+                PaymentSplit parts = PaymentAccounting.Build(store.Records).For(record);
+                if (parts.GreyAmount > 0 && parts.WhiteAmount == 0) return Catalog.GrayPaymentSection;
+            }
+            return record.Kind;
         }
         private string Curr { get { return Convert.ToString(currency.SelectedItem); } }
         private string PartyId { get { return FilterAvailable("party") ? ChoiceId(party) : ""; } }
@@ -564,7 +626,12 @@ namespace WorkLedger
             string selected = ChoiceId(status);
             if (selected == "") return true;
             if (r.Kind == "party") return r.Get("role") == selected;
-            if (r.Kind == "payment") return selected == "advance" ? store.PaymentUnallocated(r.Id) > 0 : store.PaymentUnallocated(r.Id) == 0;
+            if (r.Kind == "payment")
+            {
+                PaymentSplit parts = ViewPaymentParts(r);
+                decimal advance = current == Catalog.GrayPaymentSection ? parts.GreyAmount - parts.AllocatedGrey : parts.WhiteAmount - parts.AllocatedWhite;
+                return selected == "advance" ? advance > 0 : advance == 0;
+            }
             if (r.Kind == "act")
             {
                 if (selected == "due") return r.Get("status") == "signed" && store.ActDue(r.Id) > 0;
@@ -596,7 +663,12 @@ namespace WorkLedger
                 if (r.Get("status") == "sent") yield return "Получить подпись";
                 if (r.Get("status") == "draft") yield return "Подготовить и отправить";
             }
-            if (r.Kind == "payment") { yield return F(store.AllocatedFromPayment(r.Id)); yield return F(store.PaymentUnallocated(r.Id)); }
+            if (r.Kind == "payment")
+            {
+                yield return F(store.AllocatedFromPayment(r.Id)); yield return F(store.PaymentUnallocated(r.Id));
+                PaymentSplit parts = ViewPaymentParts(r); yield return F(parts.WhiteAmount); yield return F(parts.GreyAmount);
+                yield return parts.IsMixed ? "Смешанная оплата Белая часть Серая часть" : parts.GreyAmount > 0 ? "Серая оплата" : "Белая оплата";
+            }
             if (r.Kind == "estimate") yield return F(store.EstimateTotal(r.Id));
             if (r.Kind == "contract")
             {
@@ -646,7 +718,14 @@ namespace WorkLedger
         }
         public void RefreshView()
         {
-            if (refreshing || party.Items.Count == 0 || current == "create-act") return;
+            if (refreshing || party.Items.Count == 0 || IsActComposerSection(current)) return;
+            if (current == "taxes")
+            {
+                grid.Columns.Clear(); grid.Rows.Clear(); table = new TableData { Title = "Налоги" };
+                if (taxesPage != null) taxesPage.RefreshData();
+                return;
+            }
+            viewPaymentAccounting = PaymentAccounting.Build(store.Records);
             UpdateDateFilterDisplay();
             string sortedDateHeader = grid.SortedColumn != null && Object.Equals(grid.SortedColumn.Tag, "date") ? grid.SortedColumn.HeaderText : null;
             ListSortDirection dateSortDirection = grid.SortOrder == SortOrder.Descending ? ListSortDirection.Descending : ListSortDirection.Ascending;
@@ -656,7 +735,7 @@ namespace WorkLedger
                 count.Text = "Дата «С» должна быть не позже даты «По». Исправьте период или нажмите «Сбросить»."; return;
             }
             if (current == "overview") { RenderOverview(); return; }
-            if (current == "reports") { ConfigureFilters(false); hint.Text = report.SelectedIndex == 0 || report.SelectedIndex == 3 ? "Даты фильтруют даты документов; остатки и исполнение показаны на сегодня." : report.SelectedIndex == 1 ? "Затраты включают всех подрядчиков объекта. Контрагент в фильтре — основной заказчик объекта." : report.SelectedIndex == 2 ? "Сальдо по актам и всем платежам, включая авансы. Положительное — нам должны, отрицательное — мы должны." : "Даты фильтруют даты документов. Валюты считаются отдельно."; table = BuildReport(); }
+            if (current == "reports") { ConfigureFilters(false); hint.Text = report.SelectedIndex == 0 || report.SelectedIndex == 3 ? "Даты фильтруют даты документов; остатки и исполнение показаны на сегодня." : report.SelectedIndex == 1 ? "Затраты включают всех подрядчиков объекта. Контрагент в фильтре — основной заказчик объекта." : report.SelectedIndex == 2 ? "Сальдо по актам и всем платежам, включая авансы. Положительное — нам должны, отрицательное — мы должны." : report.SelectedIndex == 6 ? "Подписанные обычные акты вне архива. Акты вне не включаются. Период — по дате акта." : "Даты фильтруют даты документов. Валюты считаются отдельно."; table = BuildReport(); }
             else if (current == "audit")
             {
                 table = new TableData { Title = "История изменений" }; table.Headers.AddRange(new[] { "Дата и время", "Пользователь", "Действие", "Раздел", "Описание" });
@@ -674,21 +753,27 @@ namespace WorkLedger
                 foreach (var f in fields) table.Headers.Add(f.Label);
                 bool derivedCurrency = FilterAvailable("currency") && !fields.Any(f => f.Key == "currency");
                 if (derivedCurrency) table.Headers.Add("Валюта");
-                if (current == "act") table.Headers.AddRange(new[] { "Зачтено", "Общий остаток", "Удержано", "К оплате", "Оплата" });
+                if (Catalog.IsActSection(current)) table.Headers.AddRange(new[] { "Зачтено", "Общий остаток", "Удержано", "К оплате", "Оплата" });
                 if (current == "invoice") table.Headers.Add("Оплата по акту");
-                if (current == "payment") table.Headers.AddRange(new[] { "Зачтено в акты", "Аванс" });
+                if (Catalog.IsPaymentSection(current)) table.Headers.AddRange(new[] { "Белая часть", "Серая часть", "Зачтено в этом разделе", "Аванс в этом разделе" });
                 if (current == "contract") table.Headers.AddRange(new[] { "С допсоглашениями", "Закрыто актами", "Осталось работ" });
                 if (current == "estimate") table.Headers.Add("Сумма сметы");
                 if (current == "work") table.Headers.Add("Сумма");
                 if (current == "project") table.Headers.AddRange(new[] { "Выручка (" + Curr + ")", "Затраты (" + Curr + ")", "Прибыль (" + Curr + ")" });
                 table.Headers.Add("В архиве");
-                foreach (var r in store.Records.Where(x => x.Kind == current && (archived.Checked || x.Get("archived") != "true")).Where(x => Match(x, true) && MatchesSearch(x)).OrderByDescending(x => x.Get("date")).ThenBy(x => x.Get("number")))
+                foreach (var r in store.Records.Where(x => MatchesCurrentSection(x) && (archived.Checked || x.Get("archived") != "true")).Where(x => Match(x, true) && MatchesSearch(x)).OrderByDescending(x => x.Get("date")).ThenBy(x => x.Get("number")))
                 {
                     var row = fields.Select(f => Value(r, f)).ToList();
                     if (derivedCurrency) row.Add(Effective(r).Get("currency"));
-                    if (current == "act") row.AddRange(new[] { F(store.AllocatedToAct(r.Id)), F(store.ActGrossDue(r.Id)), F(store.ActiveHolds(r.Id)), F(store.ActDue(r.Id)), Status(r) });
+                    if (Catalog.IsActSection(current)) row.AddRange(new[] { F(store.AllocatedToAct(r.Id)), F(store.ActGrossDue(r.Id)), F(store.ActiveHolds(r.Id)), F(store.ActDue(r.Id)), Status(r) });
                     if (current == "invoice") { var a = store.Find(r.Get("actId")); row.Add(a == null ? "Акт не указан" : Status(a)); }
-                    if (current == "payment") row.AddRange(new[] { F(store.AllocatedFromPayment(r.Id)), F(store.PaymentUnallocated(r.Id)) });
+                    if (Catalog.IsPaymentSection(current))
+                    {
+                        PaymentSplit parts = ViewPaymentParts(r);
+                        decimal sectionAmount = current == Catalog.GrayPaymentSection ? parts.GreyAmount : parts.WhiteAmount;
+                        decimal allocatedPart = current == Catalog.GrayPaymentSection ? parts.AllocatedGrey : parts.AllocatedWhite;
+                        row.AddRange(new[] { F(parts.WhiteAmount), F(parts.GreyAmount), F(allocatedPart), F(sectionAmount - allocatedPart) });
+                    }
                     if (current == "contract") row.AddRange(new[] { F(store.EffectiveContractAmount(r.Id)), F(store.ContractActTotal(r.Id)), F(store.EffectiveContractAmount(r.Id) - store.ContractActTotal(r.Id)) });
                     if (current == "estimate") row.Add(F(store.EstimateTotal(r.Id)));
                     if (current == "work") row.Add(F(Money(r)));
@@ -702,6 +787,16 @@ namespace WorkLedger
             {
                 int column = grid.Columns.Add("c" + grid.Columns.Count, h);
                 if (IsDateColumn(h)) grid.Columns[column].Tag = "date";
+            }
+            if (Catalog.IsPaymentSection(current))
+            {
+                string[] priority = { "Дата", "Номер документа", "Номер", "Контрагент", "Сумма", "Белая часть", "Серая часть", "Валюта", "Акт вне", "Акт" };
+                int displayIndex = 0;
+                foreach (string header in priority)
+                {
+                    var column = grid.Columns.Cast<DataGridViewColumn>().FirstOrDefault(c => c.HeaderText == header);
+                    if (column != null) column.DisplayIndex = displayIndex++;
+                }
             }
             int visible = 0;
             for (int i = 0; i < table.Rows.Count; i++)
@@ -732,7 +827,9 @@ namespace WorkLedger
         }
         internal Record NewRecordForCurrentSection()
         {
-            var record = new Record(current); var schema = Catalog.Get(current);
+            var schema = Catalog.Get(current); var record = new Record(schema == null ? current : schema.Kind);
+            if (current == Catalog.ExternalActSection) record.Set("accountingScope", "external");
+            if (Catalog.IsPaymentSection(current)) record.Set("paymentScope", current == Catalog.GrayPaymentSection ? "external" : "standard");
             if (schema == null) return record;
             if (schema.Fields.Any(f => f.Key == "currency")) record.Set("currency", Curr == "Все валюты" || Curr == "" ? BaseCurrency : Curr);
             if (schema.Fields.Any(f => f.Key == "partyId") && PartyId != "") record.Set("partyId", PartyId);
@@ -742,9 +839,9 @@ namespace WorkLedger
         }
         private void Add()
         {
-            if (current == "act") { Navigate("create-act"); return; }
+            if (Catalog.IsActSection(current)) { Navigate(current == Catalog.ExternalActSection ? CreateExternalActSection : "create-act"); return; }
             var r = NewRecordForCurrentSection();
-            using (var editor = new RecordEditor(store, Catalog.Get(current), r)) if (editor.ShowDialog(this) == DialogResult.OK) { RefillParties(); RefreshView(); if (r.Kind == "party") RefreshMonthlyServiceAutomation(); }
+            using (var editor = new RecordEditor(store, Catalog.Get(current), r)) if (editor.ShowDialog(this) == DialogResult.OK) { RefillParties(); if (r.Kind == "payment") FocusRecord(editor.ResultRecord); else RefreshView(); if (r.Kind == "party") RefreshMonthlyServiceAutomation(); }
         }
         private void Edit()
         {
@@ -756,12 +853,12 @@ namespace WorkLedger
                     if (editor.ShowDialog(this) == DialogResult.OK) FocusRecord(editor.ResultRecord);
                 return;
             }
-            var schema = Catalog.Get(r.Kind); if (schema == null) return;
-            using (var editor = new RecordEditor(store, schema, r)) if (editor.ShowDialog(this) == DialogResult.OK) { RefillParties(); RefreshView(); if (r.Kind == "party") RefreshMonthlyServiceAutomation(); }
+            var schema = Catalog.Get(SectionForRecord(r)); if (schema == null) return;
+            using (var editor = new RecordEditor(store, schema, r)) if (editor.ShowDialog(this) == DialogResult.OK) { RefillParties(); if (r.Kind == "payment") FocusRecord(editor.ResultRecord); else RefreshView(); if (r.Kind == "party") RefreshMonthlyServiceAutomation(); }
         }
         private void FocusRecord(Record r)
         {
-            Navigate(r.Kind); refreshing = true; ResetFilters(); archived.Checked = r.Get("archived") == "true";
+            Navigate(SectionForRecord(r)); refreshing = true; ResetFilters(); archived.Checked = r.Get("archived") == "true";
             var value = Effective(r).Get("currency"); if (currency.Items.Contains(value)) currency.SelectedItem = value;
             refreshing = false; RefreshView(); SelectId(r.Id);
         }
@@ -805,24 +902,31 @@ namespace WorkLedger
         private void Settings()
         {
             var r = store.Of("settings").FirstOrDefault() ?? new Record { Kind = "settings" };
-            using (var editor = new RecordEditor(store, Catalog.Get("settings"), r)) if (editor.ShowDialog(this) == DialogResult.OK) { if (currency.Items.Contains(editor.ResultRecord.Get("currency"))) currency.SelectedItem = editor.ResultRecord.Get("currency"); RefreshView(); if (composer != null) composer.RefreshDefaults(); }
+            using (var editor = new RecordEditor(store, Catalog.Get("settings"), r)) if (editor.ShowDialog(this) == DialogResult.OK) { if (currency.Items.Contains(editor.ResultRecord.Get("currency"))) currency.SelectedItem = editor.ResultRecord.Get("currency"); RefreshView(); foreach (var pending in actComposers.Values) pending.RefreshDefaults(); }
         }
-        private void Export()
+        internal TableData BuildExportTable()
         {
             var headers = table.Headers.ToList(); var schema = Catalog.Get(current);
             var extra = schema == null ? new List<FieldDef>() : schema.Fields.Where(f => !headers.Contains(f.Label) && f.Key != "filePath").ToList();
             headers.AddRange(extra.Select(f => f.Label));
             var refs = schema == null ? new List<FieldDef>() : schema.Fields.Where(f => f.Type == "ref").ToList();
             if (schema != null) headers.Add("Идентификатор записи"); headers.AddRange(refs.Select(f => f.Label + " (ID)"));
+            if (Catalog.IsActSection(current)) headers.Add("Учет акта");
             var visible = new List<List<string>>();
             foreach (DataGridViewRow row in grid.Rows)
             {
                 var values = row.Cells.Cast<DataGridViewCell>().Select(c => Convert.ToString(c.Value)).ToList();
-                var r = store.Find(Convert.ToString(row.Tag)); if (r != null) { values.AddRange(extra.Select(f => Value(r, f))); values.Add(r.Id); values.AddRange(refs.Select(f => Effective(r).Get(f.Key))); }
+                var r = store.Find(Convert.ToString(row.Tag)); if (r != null && schema != null) { values.AddRange(extra.Select(f => Value(r, f))); values.Add(r.Id); values.AddRange(refs.Select(f => Effective(r).Get(f.Key))); }
+                if (Catalog.IsActSection(current)) values.Add(r != null && Store.IsExternalAct(r) ? "external" : "standard");
                 visible.Add(values);
             }
+            return new TableData { Title = table.Title, Headers = headers, Rows = visible };
+        }
+        private void Export()
+        {
+            TableData export = BuildExportTable();
             using (var dialog = new SaveFileDialog { Filter = "Книга Excel (*.xlsx)|*.xlsx|CSV (*.csv)|*.csv", FileName = SafeName(title.Text) + ".xlsx" })
-            { if (dialog.ShowDialog(this) == DialogResult.OK) { if (Path.GetExtension(dialog.FileName).Equals(".csv", StringComparison.OrdinalIgnoreCase)) TableIO.WriteCsv(dialog.FileName, headers, visible); else TableIO.WriteXlsx(dialog.FileName, headers, visible); MessageBox.Show(this, "Выгрузка сохранена.", "Excel"); } }
+            { if (dialog.ShowDialog(this) == DialogResult.OK) { if (Path.GetExtension(dialog.FileName).Equals(".csv", StringComparison.OrdinalIgnoreCase)) TableIO.WriteCsv(dialog.FileName, export.Headers, export.Rows); else TableIO.WriteXlsx(dialog.FileName, export.Headers, export.Rows); MessageBox.Show(this, "Выгрузка сохранена.", "Excel"); } }
         }
         private void Import()
         {
@@ -832,7 +936,7 @@ namespace WorkLedger
             {
                 if (dlg.ShowDialog(this) != DialogResult.OK) return;
                 var incoming = TableIO.Read(dlg.FileName);
-                using (var preview = new ImportDialog(store, schema, incoming, !FilterAvailable("currency") || Curr == "Все валюты" ? BaseCurrency : Curr)) if (preview.ShowDialog(this) == DialogResult.OK) { RefillParties(); RefreshView(); if (current == "party") RefreshMonthlyServiceAutomation(); }
+                using (var preview = new ImportDialog(store, schema, incoming, !FilterAvailable("currency") || Curr == "Все валюты" ? BaseCurrency : Curr, current == Catalog.ExternalActSection, current == Catalog.GrayPaymentSection)) if (preview.ShowDialog(this) == DialogResult.OK) { RefillParties(); RefreshView(); if (current == "party") RefreshMonthlyServiceAutomation(); }
             }
         }
         private void Backup()
@@ -852,9 +956,45 @@ namespace WorkLedger
                 string before = Path.Combine(Path.GetDirectoryName(store.DataDir), "WorkLedger-before-restore-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".zip");
                 BackupArchive.Create(store.DataDir, before);
                 BackupArchive.Restore(dlg.FileName, store.DataDir, ValidateSnapshot);
-                store = new Store(store.DataDir); RefillParties(); RefreshView(); RefreshMonthlyServiceAutomation();
+                ReplaceStore(new Store(store.DataDir)); RefreshMonthlyServiceAutomation();
                 MessageBox.Show(this, "База восстановлена.\nПредыдущая база сохранена:\n" + before, "Восстановление");
             }
+        }
+        private void EnsureTaxesPage()
+        {
+            if (taxesPage != null) return;
+            taxesPage = new QuarterlyTaxesPage(store);
+            taxesPage.PaymentRequested += delegate(string paymentId)
+            {
+                Guard(delegate { var payment = store.Find(paymentId); if (payment != null) FocusRecord(payment); });
+            };
+            UiStyle.ApplyTo(taxesPage); UiStyle.SetAnimations(taxesPage, interfacePreferences.AnimationsEnabled);
+            body.Controls.Add(taxesPage); taxesPage.BringToFront();
+        }
+        internal void ReplaceStore(Store replacement)
+        {
+            if (replacement == null) throw new ArgumentNullException("replacement");
+            viewTransition.Cancel();
+            bool hadTaxesPage = taxesPage != null;
+            int taxYear = hadTaxesPage ? taxesPage.SelectedYear : 0;
+            int taxQuarter = hadTaxesPage ? taxesPage.SelectedQuarter : 0;
+            string taxCurrency = hadTaxesPage ? taxesPage.SelectedCurrency : null;
+            if (hadTaxesPage)
+            {
+                var previousPage = taxesPage; taxesPage = null;
+                body.Controls.Remove(previousPage); previousPage.Dispose();
+            }
+            foreach (var pending in actComposers.Values) { body.Controls.Remove(pending); pending.Dispose(); }
+            actComposers.Clear(); composer = null;
+            store = replacement;
+            RefillParties();
+            if (hadTaxesPage || current == "taxes")
+            {
+                EnsureTaxesPage();
+                if (hadTaxesPage) taxesPage.SetPeriod(taxYear, taxQuarter, taxCurrency);
+                taxesPage.Visible = current == "taxes";
+            }
+            Navigate(current);
         }
         public static void ValidateSnapshot(string path)
         {
@@ -919,7 +1059,11 @@ namespace WorkLedger
         }
         private void ShowAllActs()
         {
-            Navigate("act"); refreshing = true; ResetFilters(); archived.Checked = true; currency.SelectedItem = "Все валюты";
+            ShowAllActs(false);
+        }
+        private void ShowAllActs(bool externalActs)
+        {
+            Navigate(externalActs ? Catalog.ExternalActSection : "act"); refreshing = true; ResetFilters(); archived.Checked = true; currency.SelectedItem = "Все валюты";
             refreshing = false; RefreshView();
         }
         private void PreviewAct()
@@ -1090,7 +1234,7 @@ namespace WorkLedger
                 foreach (var e in entries.Where(e => Match(e.Item1, true)).OrderBy(e => e.Item1.Get("date")).ThenBy(e => e.Item1.Kind))
                 {
                     balance += e.Item2;
-                    t.Add(e.Item1.Id, D(e.Item1.Get("date")), (e.Item1.Kind == "act" ? "Акт " : "Оплата ") + e.Item1.Get("number"), Label(e.Item1.Get("partyId")), e.Item2 > 0 ? F(e.Item2) : "", e.Item2 < 0 ? F(-e.Item2) : "", F(e.Item2), F(balance));
+                    t.Add(e.Item1.Id, D(e.Item1.Get("date")), (Store.IsExternalAct(e.Item1) ? "Акт вне " : e.Item1.Kind == "act" ? "Акт " : "Оплата ") + e.Item1.Get("number"), Label(e.Item1.Get("partyId")), e.Item2 > 0 ? F(e.Item2) : "", e.Item2 < 0 ? F(-e.Item2) : "", F(e.Item2), F(balance));
                 }
                 t.Add("", "", search.Text.Trim() == "" ? "Итоговое сальдо (включая авансы)" : "Итог по найденным документам (включая авансы)", "", "", "", "", F(balance));
             }
@@ -1111,11 +1255,23 @@ namespace WorkLedger
                 }
                 t.Add("", "", "Всего поступило: " + F(incoming), "", "", "Всего выплачено: " + F(outgoing), "Остаток потока: " + F(incoming - outgoing), "", "");
             }
+            else if (report.SelectedIndex == 6)
+            {
+                t.Headers.AddRange(new[] { "Акт", "Дата", "Контрагент", "Объект", "Договор", "Направление", "Сумма", "Валюта", "Дата подписания" });
+                decimal incoming = 0, outgoing = 0;
+                foreach (var r in Financial("act", true).Where(r => Store.IsTaxAct(r) && r.Get("status") == "signed" && r.Get("archived") != "true").OrderBy(r => r.Get("date")).ThenBy(r => r.Get("number")))
+                {
+                    bool income = r.Get("direction") == "income";
+                    if (income) incoming += Money(r); else outgoing += Money(r);
+                    t.Add(r.Id, r.Get("number"), D(r.Get("date")), Label(r.Get("partyId")), Label(r.Get("projectId")), Label(r.Get("contractId")), income ? "Нам платят" : "Мы платим", F(Money(r)), r.Get("currency"), D(r.Get("signedDate")));
+                }
+                t.Add("", "Итого", "", "", "", "", "Доход: " + F(incoming) + "; расход: " + F(outgoing), F(incoming - outgoing), Curr, "");
+            }
             else
             {
                 t.Headers.AddRange(new[] { "Раздел", "Документ", "Контрагент", "Объект", "Срок / дата", "Задача" });
                 foreach (var r in Financial("act", true).Where(r => r.Get("archived") != "true" && (r.Get("status") == "draft" || r.Get("status") == "sent")))
-                    t.Add(r.Id, "Акт", r.Get("number"), Label(r.Get("partyId")), Label(r.Get("projectId")), D(r.Get("date")), r.Get("status") == "sent" ? "Получить подпись" : "Подготовить и отправить");
+                    t.Add(r.Id, Store.IsExternalAct(r) ? "Акт вне" : "Акт", r.Get("number"), Label(r.Get("partyId")), Label(r.Get("projectId")), D(r.Get("date")), r.Get("status") == "sent" ? "Получить подпись" : "Подготовить и отправить");
                 foreach (var r in Financial("document", true).Where(r => r.Get("archived") != "true" && r.Get("status") != "signed"))
                     t.Add(r.Id, "Документ", r.Get("title"), Label(r.Get("partyId")), Label(r.Get("projectId")), D(r.Get("date")), r.Get("status") == "missing" ? "Добавить недостающий документ" : r.Get("status") == "sent" ? "Получить подпись" : "Отправить / подписать");
                 foreach (var r in Financial("contract", true).Where(r => r.Get("status") == "active" && r.Get("dueDate") != "" && String.CompareOrdinal(r.Get("dueDate"), DateTime.Today.AddDays(7).ToString("yyyy-MM-dd")) <= 0))
@@ -1136,7 +1292,7 @@ namespace WorkLedger
             decimal spent = acts.Where(r => r.Get("direction") == "expense").Sum(r => Money(r)) + Financial("expense", false).Sum(r => Money(r));
             var cards = new FlowLayoutPanel { AutoSize = true, Width = Math.Max(500, overview.ClientSize.Width - 22), WrapContents = true, Margin = new Padding(0, 14, 0, 0) };
             cards.Controls.Add(Card("Работы для заказчиков", F(earned) + " " + Curr, "Подписанные акты"));
-            cards.Controls.Add(Card("Поступило денег", F(pay.Where(r => r.Get("direction") == "income").Sum(r => Money(r))) + " " + Curr, "Все входящие платежи, включая авансы"));
+            cards.Controls.Add(Card("С/Р", F(pay.Where(r => r.Get("direction") == "income").Sum(r => Money(r))) + " " + Curr, "Белые + серые поступления, включая авансы"));
             cards.Controls.Add(Card("Долг заказчиков", F(acts.Where(r => r.Get("direction") == "income").Sum(r => store.ActGrossDue(r.Id))) + " " + Curr, "Включает активные удержания"));
             cards.Controls.Add(Card("Долг подрядчикам", F(acts.Where(r => r.Get("direction") == "expense").Sum(r => store.ActGrossDue(r.Id))) + " " + Curr, "Подписанные акты минус зачтённые оплаты"));
             cards.Controls.Add(Card("Затраты", F(spent) + " " + Curr, "Акты подрядчиков + дополнительные расходы"));
@@ -1227,7 +1383,7 @@ namespace WorkLedger
             if (initial != null && initial.Kind == "payment") Select(payments, initial.Id);
             if (initial != null && initial.Kind == "act")
             {
-                for (int i = 0; i < payments.Items.Count; i++) { var p = store.Find(((Choice)payments.Items[i]).Id); if (p.Get("partyId") == initial.Get("partyId") && p.Get("currency") == initial.Get("currency") && p.Get("direction") == initial.Get("direction") && store.PaymentUnallocated(p.Id) > 0) { payments.SelectedIndex = i; break; } }
+                for (int i = 0; i < payments.Items.Count; i++) { var p = store.Find(((Choice)payments.Items[i]).Id); if (p.Get("partyId") == initial.Get("partyId") && p.Get("currency") == initial.Get("currency") && p.Get("direction") == initial.Get("direction") && store.PaymentUnallocated(p.Id) > 0 && Compatible(p, initial)) { payments.SelectedIndex = i; break; } }
                 Select(acts, initial.Id);
             }
         }
@@ -1245,7 +1401,8 @@ namespace WorkLedger
         }
         private static bool Compatible(Record payment, Record act)
         {
-            return new[] { "projectId", "contractId" }.All(k => payment.Get(k) == "" || act.Get(k) == "" || payment.Get(k) == act.Get(k));
+            return (payment.Get("paymentScope") == "" || Store.IsExternalAct(act) == (payment.Get("paymentScope") == "external"))
+                && new[] { "projectId", "contractId" }.All(k => payment.Get(k) == "" || act.Get(k) == "" || payment.Get(k) == act.Get(k));
         }
         private void UpdateHint()
         {

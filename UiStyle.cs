@@ -243,6 +243,9 @@ namespace WorkLedger
                         if (key == "create-act") g.DrawEllipse(pen, 1, 1, 18, 18); break;
                     case "party":
                         g.DrawEllipse(pen, 6, 2, 8, 8); g.DrawArc(pen, 3, 11, 14, 12, 180, 180); break;
+                    case "taxes":
+                        g.DrawEllipse(pen, 3, 3, 5, 5); g.DrawLine(pen, 5, 15, 15, 5);
+                        g.DrawEllipse(pen, 12, 12, 5, 5); break;
                     case "payment": case "invoice": case "expense":
                         g.DrawRectangle(pen, 2, 5, 16, 11); g.DrawLine(pen, 2, 9, 18, 9); g.DrawLine(pen, 5, 13, 8, 13); break;
                     case "reports":

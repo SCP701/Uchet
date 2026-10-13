@@ -72,6 +72,9 @@ namespace WorkLedger
             Reload();
         }
         public IEnumerable<Record> Of(string kind) { lock (gate) return records.Where(r => r.Kind == kind && r.Get("archived") != "true").Select(r => r.Clone()).ToList(); }
+        public static bool IsExternalAct(Record record) { return record != null && record.Kind == "act" && record.Get("accountingScope") == "external"; }
+        public static bool IsTaxAct(Record record) { return record != null && record.Kind == "act" && (record.Get("accountingScope") == "" || record.Get("accountingScope") == "standard"); }
+        public IEnumerable<Record> OfTaxActs() { lock (gate) return records.Where(r => IsTaxAct(r) && r.Get("archived") != "true").Select(r => r.Clone()).ToList(); }
         public Record Find(string id) { lock (gate) { Record r = records.FirstOrDefault(x => x.Id == id); return r == null ? null : r.Clone(); } }
         public long NextActNumber { get { lock (gate) return NextActNumberFor(records); } }
         public decimal DefaultHourlyRate
@@ -142,7 +145,7 @@ namespace WorkLedger
             {
                 DateTime currentMonth = new DateTime(today.Year, today.Month, 1);
                 List<Record> staged = records.Select(r => r.Clone()).ToList();
-                HashSet<string> existing = new HashSet<string>(staged.Where(r => r.Kind == "act" && r.Get("serviceGenerated") == "true")
+                HashSet<string> existing = new HashSet<string>(staged.Where(r => IsTaxAct(r) && r.Get("serviceGenerated") == "true")
                     .Select(r => r.Get("recurringPartyId") + "|" + r.Get("monthlyServiceMonth")), StringComparer.Ordinal);
                 List<Record> pending = new List<Record>();
                 JavaScriptSerializer serializer = new JavaScriptSerializer { MaxJsonLength = 100000, RecursionLimit = 20 };
@@ -190,12 +193,17 @@ namespace WorkLedger
         }
         public Record CreateHourlyActDraft(string partyId)
         {
+            return CreateHourlyActDraft(partyId, false);
+        }
+        public Record CreateHourlyActDraft(string partyId, bool external)
+        {
             lock (gate)
             {
                 Record party = records.FirstOrDefault(r => r.Id == partyId && r.Kind == "party" && r.Get("archived") != "true");
                 if (party == null) throw new InvalidOperationException("Выберите действующего контрагента.");
                 Record settings = records.FirstOrDefault(r => r.Kind == "settings" && r.Get("archived") != "true");
                 Record draft = new Record("act");
+                if (external) draft.Set("accountingScope", "external");
                 draft.Set("partyId", partyId); draft.Set("date", DateString(DateTime.Today));
                 draft.Set("currency", settings == null || settings.Get("currency") == "" ? "BYN" : settings.Get("currency"));
                 draft.Set("direction", "income"); draft.Set("status", "draft");
@@ -570,6 +578,7 @@ namespace WorkLedger
                 case "estimateId": return "Смета"; case "actId": return "Акт"; case "paymentId": return "Платёж";
                 case "amount": return "Сумма"; case "currency": return "Валюта"; case "direction": return "Направление оплаты";
                 case "status": return "Статус"; case "role": return "Роль контрагента"; case "method": return "Способ оплаты";
+                case "accountingScope": return "Учёт акта"; case "paymentScope": return "Вид оплаты";
                 case "category": return "Категория расхода"; case "type": return "Вид удержания"; case "qty": return "Количество";
                 case "price": return "Цена"; case "description": return "Описание"; case "title": return "Название";
                 default: return key;
@@ -624,6 +633,10 @@ namespace WorkLedger
                 byId.Add(r.Id, r);
                 if (r.Fields.Count > 100 || r.Fields.Any(p => p.Key == null || p.Key.Length > 100 || (p.Value != null && p.Value.Length > 100000))) throw new InvalidOperationException("Слишком большой размер поля.");
                 if (r.Get("archived") != "" && r.Get("archived") != "true" && r.Get("archived") != "false") throw new InvalidOperationException("Некорректный признак архива.");
+                if (r.Kind == "act") Choice(r, "accountingScope", "", "standard", "external");
+                else if (r.Get("accountingScope") != "") throw new InvalidOperationException("Раздел учёта можно указывать только у акта.");
+                if (r.Kind == "payment") Choice(r, "paymentScope", "", "standard", "external");
+                else if (r.Get("paymentScope") != "") throw new InvalidOperationException("Вид оплаты можно указывать только у платежа.");
                 foreach (string moneyKey in new[] { "amount", "price", "hourlyRate" }) if (r.Get(moneyKey) != "" && ParseDecimal(r.Get(moneyKey)) != ParseMoney(r.Get(moneyKey))) throw new InvalidOperationException("В базе сумма «" + FieldLabel(moneyKey) + "» содержит доли копейки.");
                 foreach (string key in new[] { "date", "dueDate", "signedDate", "reversedDate" }) if (r.Get(key) != "") DateField(r, key, false);
                 if (r.Get("currency") != "" && !new[] { "BYN", "RUB", "USD", "EUR" }.Contains(r.Get("currency"))) throw new InvalidOperationException("Выберите валюту BYN, RUB, USD или EUR.");
@@ -654,6 +667,7 @@ namespace WorkLedger
                     if (r.Get("serviceGenerated") != "" && r.Get("serviceGenerated") != "true" && r.Get("serviceGenerated") != "false") throw new InvalidOperationException("Некорректный признак автоматического ежемесячного акта.");
                     if (r.Get("serviceGenerated") == "true" || r.Get("recurringPartyId") != "" || r.Get("monthlyServiceMonth") != "")
                     {
+                        if (IsExternalAct(r)) throw new InvalidOperationException("Автоматический ежемесячный акт относится к разделу «Акты».");
                         DateTime month;
                         if (r.Get("serviceGenerated") != "true" || r.Get("recurringPartyId") != r.Get("partyId") || !DateTime.TryParseExact(r.Get("monthlyServiceMonth"), "yyyy-MM", CultureInfo.InvariantCulture, DateTimeStyles.None, out month))
                             throw new InvalidOperationException("Некорректный период автоматического ежемесячного акта.");
@@ -675,7 +689,14 @@ namespace WorkLedger
                     }
                 }
                 else if (r.Kind == "invoice") { Required(r, "number", "amount", "currency", "direction"); Choice(r, "status", "draft", "sent", "cancelled"); }
-                else if (r.Kind == "payment") { Required(r, "amount", "currency", "direction"); Choice(r, "method", "bank", "cash", "other"); }
+                else if (r.Kind == "payment")
+                {
+                    Required(r, "amount", "currency", "direction"); Choice(r, "method", "bank", "cash", "other");
+                    if (r.Get("paymentScope") == "external" && (act == null || !IsExternalAct(act)))
+                        throw new InvalidOperationException("Для серой оплаты выберите акт из раздела «Акты вне».");
+                    if (r.Get("paymentScope") == "standard" && act != null && IsExternalAct(act))
+                        throw new InvalidOperationException("Обычная оплата не может быть привязана к акту из раздела «Акты вне».");
+                }
                 else if (r.Kind == "expense") { Required(r, "amount", "currency"); Choice(r, "category", "materials", "labor", "transport", "rent", "other"); }
                 else if (r.Kind == "hold") { Required(r, "amount"); Choice(r, "status", "active", "released"); Choice(r, "type", "warranty", "penalty", "other"); if (r.Get("status") == "active" && act.Get("status") != "signed") throw new InvalidOperationException("Удержание возможно только по подписанному акту."); }
                 else if (r.Kind == "document") { Required(r, "title"); Choice(r, "status", "missing", "draft", "sent", "signed"); string f = r.Get("filePath"); if (f != "" && (Path.IsPathRooted(f) || !f.Replace('\\', '/').StartsWith("attachments/", StringComparison.Ordinal) || f.Split('/', '\\').Contains(".."))) throw new InvalidOperationException("Недопустимый путь вложения."); }
@@ -693,6 +714,9 @@ namespace WorkLedger
                     {
                         if (act.Get("status") != "signed") throw new InvalidOperationException("Оплату можно распределить только на подписанный акт.");
                         Same(payment, act, "partyId", "projectId", "contractId", "currency", "direction");
+                        string paymentScope = payment.Get("paymentScope");
+                        if (paymentScope != "" && (paymentScope == "external") != IsExternalAct(act))
+                            throw new InvalidOperationException("Вид оплаты должен совпадать с разделом акта. Обычная оплата зачитывается в обычные акты, серая — в «Акты вне».");
                     }
                 }
                 if (new[] { "contract", "amendment", "estimate", "act", "invoice", "payment", "allocation", "expense", "hold" }.Contains(r.Kind)) DateField(r, "date", true);
