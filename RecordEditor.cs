@@ -483,11 +483,13 @@ namespace WorkLedger
             }
             if (field.Type == "enum" || field.Type == "ref")
             {
-                ComboBox combo = new ComboBox
-                {
-                    DropDownStyle = ComboBoxStyle.DropDownList, IntegralHeight = false,
-                    MaxDropDownItems = 12, DropDownHeight = 320, Height = 31
-                };
+                ComboBox combo = field.Type == "ref" ? (ComboBox)new ReferencePickerCombo() : new ComboBox();
+                combo.DropDownStyle = ComboBoxStyle.DropDownList; combo.IntegralHeight = false;
+                combo.MaxDropDownItems = 12; combo.DropDownHeight = 320; combo.Height = 31;
+                if (field.Type == "ref")
+                    ((ReferencePickerCombo)combo).Configure(store, field.ReferenceKind, field.Label,
+                        delegate(object item) { Choice option = item as Choice; return option == null ? "" : option.Value; },
+                        !field.Required && !(IsPaymentActField(field) && SelectedPaymentScope == "external"));
                 if (field.Type == "ref" || !field.Required && !field.Options.ContainsKey("")) combo.Items.Add(new Choice("", "— Не выбрано —"));
                 if (field.Type == "enum")
                     foreach (KeyValuePair<string, string> option in field.Options)
@@ -593,6 +595,11 @@ namespace WorkLedger
             Text = (store.Find(source.Id) == null ? "Добавить: " : "Изменить: ") + singular;
             if (paymentTitle != null) paymentTitle.Text = Text;
             fieldLabels["actId"].Text = scope == "external" ? "Акт вне *" : "Акт";
+            ReferencePickerCombo actPicker = inputs["actId"] as ReferencePickerCombo;
+            if (actPicker != null)
+                actPicker.Configure(store, "act", scope == "external" ? "Акт вне" : "Акт",
+                    delegate(object item) { Choice option = item as Choice; return option == null ? "" : option.Value; },
+                    scope != "external");
             hint.Text = scope == "external"
                 ? "Серая оплата не входит в расчёт налога. Для погашения долга используйте «Зачесть оплату»."
                 : scope == "standard" ? "В налоговом расчёте учитываются белые поступления. Для погашения долга используйте «Зачесть оплату»."

@@ -10,6 +10,8 @@ namespace WorkLedger
     public sealed class ServiceReminderWindow : Form
     {
         private readonly string directory;
+        private readonly Store ledger;
+        private readonly Button confirmPayment=new UiButton{Text="Подтвердить оплату",AutoSize=true};
         private readonly Action<string> openAct;
         private readonly Icon applicationIcon;
         private ServiceMailSettings settings;
@@ -27,7 +29,7 @@ namespace WorkLedger
         private List<ServiceMailPlan> plans=new List<ServiceMailPlan>();
         public ServiceReminderWindow(Store store,Action<string> navigate)
         {
-            directory=store.DataDir;openAct=navigate;settings=ServiceMailSettings.Load(directory);
+            ledger=store;directory=store.DataDir;openAct=navigate;settings=ServiceMailSettings.Load(directory);
             Text="Обслуживание — напоминания об оплате";Width=1080;Height=750;MinimumSize=new Size(980,660);
             StartPosition=FormStartPosition.CenterParent;Font=new Font("Segoe UI",10);
             BackColor=UiStyle.Background;ForeColor=UiStyle.Ink;
@@ -39,9 +41,10 @@ namespace WorkLedger
             listPage.Controls.Add(plansGrid);listPage.Controls.Add(summary);
             var commands=Strip();
             commands.Controls.Add(MakeButton("Обновить",RefreshLists));
-            commands.Controls.Add(MakeButton("Предпросмотр письма",Preview));
+            confirmPayment.Name="confirmServicePayment";confirmPayment.Click+=delegate{ConfirmSelectedPayment();};commands.Controls.Add(confirmPayment);
             send.Click+=delegate{SendDue();};commands.Controls.Add(send);
-            commands.Controls.Add(MakeButton("Открыть акт",OpenSelectedAct));
+            commands.Controls.Add(PaymentActionsMenu());
+            plansGrid.SelectionChanged+=delegate{var plan=SelectedPlan();confirmPayment.Enabled=plan!=null&&plan.Balance.Due>0;};
             commands.Dock=DockStyle.Bottom;listPage.Controls.Add(commands);
             ConfigureGrid(plansGrid);ConfigureGrid(historyGrid);
             historyPage.Controls.Add(historyGrid);
@@ -74,6 +77,19 @@ namespace WorkLedger
             if(senderName.Text==""&&own!=null)senderName.Text=own.Get("name");
             mailInfo.Text=String.IsNullOrEmpty(settings.ProtectedPassword)?"Укажите пароль приложения почтового ящика.":"Пароль сохранён. Оставьте поле пустым, чтобы сохранить его, или введите новый.";
             UiStyle.ApplyTo(this);RefreshLists();
+            Shown+=delegate{if(plansGrid.Rows.Count>0){plansGrid.CurrentCell=plansGrid.Rows[0].Cells[0];var plan=SelectedPlan();confirmPayment.Enabled=plan!=null&&plan.Balance.Due>0;}};
+        }
+        private Button PaymentActionsMenu()
+        {
+            var menu=new ContextMenuStrip{Name="servicePaymentActions",ShowImageMargin=false,Font=Font};
+            var preview=new ToolStripMenuItem("Предпросмотр письма"){Name="preview-service-mail"};preview.Click+=delegate{Preview();};
+            var act=new ToolStripMenuItem("Открыть акт"){Name="open-service-act"};act.Click+=delegate{OpenSelectedAct();};
+            menu.Items.Add(preview);menu.Items.Add(act);
+            menu.Opening+=delegate{preview.Enabled=SelectedPlan()!=null;act.Enabled=SelectedPlan()!=null;};
+            Button button=null;button=MakeButton("Действия ▾",delegate{menu.Show(button,new Point(0,button.Height));});
+            button.Name="servicePaymentActionsButton";button.ContextMenuStrip=menu;button.AccessibleName="Действия с оплатой обслуживания";button.AccessibleRole=AccessibleRole.ButtonMenu;
+            button.KeyDown+=delegate(object sender,KeyEventArgs e){if(e.KeyCode==Keys.Down||e.KeyCode==Keys.F4){menu.Show(button,new Point(0,button.Height));e.Handled=true;e.SuppressKeyPress=true;}};
+            button.Disposed+=delegate{menu.Dispose();};return button;
         }
         private static FlowLayoutPanel Strip(){return new FlowLayoutPanel{Height=46,Padding=new Padding(8,5,8,4),WrapContents=false,BackColor=UiStyle.Surface};}
         private static Button MakeButton(string text,Action action){var b=new UiButton{Text=text,AutoSize=true,MinimumSize=new Size(0,34),Padding=new Padding(9,0,9,0),Margin=new Padding(0,0,7,0)};b.Click+=delegate{action();};return b;}
@@ -119,8 +135,9 @@ namespace WorkLedger
                 }
                 summary.Text=(settings.Enabled?"Автоматическая рассылка включена.":"Автоматическая рассылка выключена.")+
                     "\r\nПервое письмо — через 7 дней после акта; второе — через 3 дня после первого, если остаётся неоплаченная сумма. Всего два письма."+
-                    "\r\nОплаты берутся из выписки по ссылке на акт или однозначному номеру в назначении. Спорная оплата требует проверки.";
-            }catch(Exception e){summary.Text=e.Message;send.Enabled=false;}
+                    "\r\nОплаты учитываются по выписке и ручному подтверждению. Спорную банковскую оплату можно привязать к акту.";
+                var selected=SelectedPlan();confirmPayment.Enabled=selected!=null&&selected.Balance.Due>0;send.Enabled=true;
+            }catch(Exception e){summary.Text=e.Message;send.Enabled=false;confirmPayment.Enabled=false;}
         }
         private static string DateText(string text){return ServiceReminderLedger.Date(text).ToString("dd.MM.yyyy");}
         private static string UtcText(string text){DateTime date;return DateTime.TryParse(text,CultureInfo.InvariantCulture,DateTimeStyles.RoundtripKind,out date)?date.ToUniversalTime().AddHours(3).ToString("dd.MM.yyyy HH:mm"):"";}
@@ -130,6 +147,16 @@ namespace WorkLedger
         {
             var plan=SelectedPlan();if(plan==null)return;
             ShowText("Предпросмотр письма","Кому: "+plan.Recipient+"\r\nТема: "+plan.Subject+"\r\n\r\n"+plan.Body);
+        }
+        private void ConfirmSelectedPayment()
+        {
+            var plan=SelectedPlan();if(plan==null)return;
+            try
+            {
+                ledger.Reload();
+                using(var dialog=new ManualPaymentDialog(ledger,plan.Balance.Act.Id))
+                    if(dialog.ShowDialog(this)==DialogResult.OK)RefreshLists();
+            }catch(Exception e){Warn(e.Message);}
         }
         private void OpenSelectedAct(){var plan=SelectedPlan();if(plan==null||openAct==null)return;Close();openAct(plan.Balance.Act.Id);}
         private void ShowHistory()

@@ -1,9 +1,12 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Drawing;
 using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Text;
 using System.Windows.Forms;
 
 namespace WorkLedger
@@ -50,6 +53,205 @@ namespace WorkLedger
         private static void Unchanged(Store store, long revision, byte[] bytes, string scenario)
         {
             Assert(store.Revision == revision && bytes.SequenceEqual(File.ReadAllBytes(store.DataPath)), scenario + " wrote the ledger");
+        }
+        private delegate bool TestWindowVisitor(IntPtr window, IntPtr state);
+        [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
+        [DllImport("user32.dll")] private static extern bool EnumThreadWindows(uint thread, TestWindowVisitor visitor, IntPtr state);
+        [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr window, uint command);
+        [DllImport("user32.dll")] private static extern bool PostMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
+        private sealed class DescriptionReadWatchdog : IDisposable
+        {
+            private readonly IntPtr owner;
+            private readonly uint thread;
+            private readonly string scenario;
+            private readonly System.Threading.Timer timeout;
+            private volatile bool finished;
+            private volatile bool expired;
+            public volatile string Stage = "creating card";
+            public DescriptionReadWatchdog(Form editor, string name)
+            {
+                owner = editor.Handle; thread = GetCurrentThreadId(); scenario = name;
+                timeout = new System.Threading.Timer(delegate
+                {
+                    if (finished) return;
+                    expired = true;
+                    var windows = new List<string>();
+                    EnumThreadWindows(thread, delegate(IntPtr window, IntPtr state)
+                    {
+                        Control control = Control.FromHandle(window);
+                        bool owned = GetWindow(window, 4) == owner;
+                        windows.Add(window.ToString("X") + ":" + (control == null ? "native" : control.GetType().Name) + ":owned=" + owned);
+                        if (owned && control is ActWorkDescriptionDialog) PostMessage(window, 0x0010, IntPtr.Zero, IntPtr.Zero);
+                        return true;
+                    }, IntPtr.Zero);
+                    Console.Error.WriteLine("FAIL: description read timeout: " + scenario + "; stage=" + Stage + "; thread windows=" + String.Join(", ", windows));
+                    Console.Error.Flush();
+                    System.Threading.Thread.Sleep(2000);
+                    if (!finished) Environment.Exit(1);
+                }, null, 10000, System.Threading.Timeout.Infinite);
+            }
+            public void Dispose()
+            {
+                finished = true; timeout.Dispose();
+                Assert(!expired, scenario + " timed out at " + Stage);
+            }
+        }
+        private static ActWorkDescriptionDialog OwnDescriptionDialog(Form editor)
+        {
+            IntPtr owner = editor.Handle;
+            ActWorkDescriptionDialog dialog = Application.OpenForms.OfType<ActWorkDescriptionDialog>()
+                .FirstOrDefault(form => form.IsHandleCreated && GetWindow(form.Handle, 4) == owner);
+            if (dialog == null)
+                EnumThreadWindows(GetCurrentThreadId(), delegate(IntPtr window, IntPtr state)
+                {
+                    if (GetWindow(window, 4) == owner) dialog = Control.FromHandle(window) as ActWorkDescriptionDialog;
+                    return dialog == null;
+                }, IntPtr.Zero);
+            return dialog;
+        }
+        private const string DescriptionTail = "END-OF-COMPLETE-DESCRIPTION";
+        private static string LongDescription(int prefixLength)
+        {
+            const string paragraph = "Подробное описание выполненной работы: проверка оборудования и настройка учёта.\r\n";
+            var text = new StringBuilder();
+            while (text.Length + paragraph.Length <= prefixLength) text.Append(paragraph);
+            text.Append('Ш', prefixLength - text.Length);
+            return text.Append(DescriptionTail).ToString();
+        }
+        private static void InViewport(Control control, string scenario)
+        {
+            Assert(control.Visible && control.ClientSize.Width > 0 && control.ClientSize.Height > 0, scenario + " is not visible");
+            Rectangle bounds = control.RectangleToScreen(control.ClientRectangle);
+            for (Control parent = control.Parent; parent != null; parent = parent.Parent)
+                Assert(parent.RectangleToScreen(parent.ClientRectangle).Contains(bounds), scenario + " is clipped by " + parent.GetType().Name);
+        }
+        private static void SelectDescription(DataGridView grid, int row, string expected, string scenario)
+        {
+            grid.ClearSelection(); grid.CurrentCell = grid.Rows[row].Cells["description"]; grid.Rows[row].Selected = true;
+            Application.DoEvents();
+            Assert(Convert.ToString(grid.Rows[row].Cells["description"].Value) == expected, scenario + " truncated the underlying work text");
+            DataObject content = grid.GetClipboardContent();
+            Assert(content != null && content.GetDataPresent(DataFormats.UnicodeText), scenario + " cannot prepare full Unicode clipboard data");
+            string copied = Convert.ToString(content.GetData(DataFormats.UnicodeText)).Replace("\r\n", "\n");
+            Assert(copied.Contains(expected.Replace("\r\n", "\n")), scenario + " truncated work text in prepared clipboard data");
+        }
+        private static void OpenFullDescription(ActWorkItemsControl works, string expected, string scenario, DescriptionReadWatchdog watchdog)
+        {
+            Button button = works.FullDescriptionButton;
+            Assert(button.Name == "showFullWorkDescription" && button.Text == "Полное описание" && button.Enabled, scenario + " full-description command unavailable");
+            InViewport(button, scenario + " full-description button");
+            Form owner = works.FindForm();
+            Assert(button.CanSelect, scenario + " full-description button cannot receive a click");
+            bool inspected = false; Exception failure = null;
+            using (var timer = new System.Windows.Forms.Timer { Interval = 20 })
+            {
+                timer.Tick += delegate
+                {
+                    var dialog = OwnDescriptionDialog(owner);
+                    if (dialog == null || !dialog.Visible || !dialog.Modal || !dialog.DescriptionBox.IsHandleCreated) return;
+                    timer.Stop(); inspected = true; watchdog.Stage = "reading visible modal";
+                    try
+                    {
+                        TextBox box = dialog.DescriptionBox;
+                        Assert(dialog.FullDescription == expected && box.Text == expected && box.Text.EndsWith(DescriptionTail), scenario + " viewer lost source text or final marker");
+                        Assert(box.ReadOnly && box.Multiline && box.WordWrap && box.ShortcutsEnabled, scenario + " viewer does not allow safe multiline reading and selection");
+                        InViewport(box, scenario + " description viewer");
+                        box.SelectAll();
+                        Assert(box.SelectedText == expected, scenario + " select-all cannot copy the whole description");
+                        box.SelectionStart = 0; box.SelectionLength = 0; box.ScrollToCaret();
+                        Application.DoEvents();
+                        Point initialEnd = box.GetPositionFromCharIndex(box.TextLength - 1);
+                        Assert(initialEnd.Y < 0 || initialEnd.Y + box.Font.Height > box.ClientSize.Height, scenario + " did not exercise a description longer than its viewport");
+                        box.Focus(); box.SelectionStart = box.TextLength; box.SelectionLength = 0; box.ScrollToCaret();
+                        Application.DoEvents();
+                        Point end = box.GetPositionFromCharIndex(box.TextLength - 1);
+                        Assert(end.X >= 0 && end.X < box.ClientSize.Width && end.Y >= 0 && end.Y + box.Font.Height <= box.ClientSize.Height,
+                            scenario + " final text remains outside the viewer after ScrollToCaret: " + end + " / " + box.ClientSize);
+                        Assert(box.SelectionStart == box.TextLength && box.Text == expected, scenario + " scrolling changed text or failed to reach its end");
+                    }
+                    catch (Exception error) { failure = error; }
+                    finally { dialog.DialogResult = DialogResult.Cancel; dialog.Close(); }
+                };
+                watchdog.Stage = "PerformClick before modal";
+                timer.Start(); button.PerformClick(); timer.Stop();
+                watchdog.Stage = "PerformClick returned";
+            }
+            if (failure != null) throw new InvalidOperationException(scenario + " full-description modal failed", failure);
+            Assert(inspected && OwnDescriptionDialog(owner) == null, scenario + " did not open and close the real full-description modal");
+        }
+        private static void SameSource(Store store, Record original, long revision, byte[] bytes, string scenario)
+        {
+            Unchanged(store, revision, bytes, scenario);
+            Record saved = store.Find(original.Id);
+            Assert(saved.Kind == original.Kind && saved.Fields.Count == original.Fields.Count && original.Fields.All(field => saved.Get(field.Key) == field.Value),
+                scenario + " changed source fields or the confirmed total");
+        }
+        private static void TestFullDescriptionReadAccess(Store store, string partyId)
+        {
+            Size[] sizes = { new Size(800, 610), new Size(1020, 760) };
+            foreach (int prefixLength in new[] { 2300, 8000 })
+            {
+                string description = LongDescription(prefixLength);
+                Assert(description.Length == prefixLength + 27, "legacy full-description fixture length is incorrect");
+                Record source = Act(store, partyId, "Просмотр-" + description.Length, "120.00", description);
+                source.Set("sourceArchivePath", "test-source.zip"); source.Set("sourceArchiveEntry", "legacy-act.html");
+                source.Set("customField", "Не менять исходные сведения"); store.CaptureActSnapshots(source); store.Upsert(source); source = store.Find(source.Id).Clone();
+                long revision = store.Revision; byte[] bytes = File.ReadAllBytes(store.DataPath);
+                foreach (Size size in sizes)
+                {
+                    string scenario = "legacy " + description.Length + " chars at " + size.Width + "x" + size.Height;
+                    using (var editor = new RecordEditor(store, Catalog.Get("act"), source))
+                    using (var watchdog = new DescriptionReadWatchdog(editor, scenario))
+                    {
+                        watchdog.Stage = "showing card";
+                        editor.ShowInTaskbar = false; editor.Opacity = 0; editor.Size = size; editor.Show(); Application.DoEvents();
+                        watchdog.Stage = "copying source row";
+                        var works = Works(editor); var grid = works.WorkGrid;
+                        Assert(grid.Rows.Count == 1 && works.IsManualPricing && Store.ParseMoney(Inputs(editor)["amount"].Text) == 120m, scenario + " changed source rows or manual total");
+                        SelectDescription(grid, 0, description, scenario); OpenFullDescription(works, description, scenario, watchdog);
+                        watchdog.Stage = "preparing unchanged candidate";
+                        Record candidate = editor.PrepareRecord();
+                        Assert(source.Fields.All(field => candidate.Get(field.Key) == field.Value), scenario + " read-only viewing changed the unsaved act candidate");
+                        Assert(editor.ResultRecord == null, scenario + " viewing saved the act");
+                        SameSource(store, source, revision, bytes, scenario + " modal close"); editor.Close();
+                    }
+                    SameSource(store, source, revision, bytes, scenario + " card disposal");
+                }
+            }
+            string[] descriptions = { LongDescription(1963), "Второй пункт: проверка печати", "Третий пункт: настройка доступа" };
+            Record multiple = Act(store, partyId, "Просмотр-нескольких-работ", "345.67", "Комплекс выполненных работ");
+            multiple.Set(ActHtmlDocument.DescriptiveItemsField, ActHtmlDocument.SerializeDescriptions(descriptions));
+            multiple.Set("customField", "Все пункты из источника"); store.CaptureActSnapshots(multiple); store.Upsert(multiple); multiple = store.Find(multiple.Id).Clone();
+            long multiRevision = store.Revision; byte[] multiBytes = File.ReadAllBytes(store.DataPath);
+            foreach (Size size in sizes)
+            {
+                string scenario = "multiple works at " + size.Width + "x" + size.Height;
+                using (var editor = new RecordEditor(store, Catalog.Get("act"), multiple))
+                using (var watchdog = new DescriptionReadWatchdog(editor, scenario))
+                {
+                    watchdog.Stage = "showing card";
+                    editor.ShowInTaskbar = false; editor.Opacity = 0; editor.Size = size; editor.Show(); Application.DoEvents();
+                    watchdog.Stage = "checking work-row geometry";
+                    var works = Works(editor); var grid = works.WorkGrid;
+                    Assert(grid.Rows.Count == descriptions.Length && works.IsManualPricing, scenario + " collapsed unpriced work rows");
+                    int viewport = grid.ClientSize.Height - grid.ColumnHeadersHeight;
+                    Assert(viewport > grid.RowTemplate.Height && grid.Rows[0].Height < viewport, scenario + " long first row monopolizes the work viewport");
+                    for (int row = 0; row < descriptions.Length; ++row)
+                    {
+                        SelectDescription(grid, row, descriptions[row], scenario + " row " + (row + 1));
+                        grid.FirstDisplayedScrollingRowIndex = row; Application.DoEvents();
+                        Rectangle visible = grid.GetCellDisplayRectangle(grid.Columns["description"].Index, row, true);
+                        Assert(visible.Width > 0 && visible.Height >= grid.Rows[row].Height - 2 && visible.Top >= grid.ColumnHeadersHeight && visible.Bottom <= grid.ClientSize.Height,
+                            scenario + " cannot scroll to work row " + (row + 1));
+                    }
+                    SelectDescription(grid, 0, descriptions[0], scenario); OpenFullDescription(works, descriptions[0], scenario, watchdog);
+                    watchdog.Stage = "preparing unchanged candidate";
+                    Record candidate = editor.PrepareRecord();
+                    Assert(candidate.Get("amount") == "345.67" && multiple.Fields.All(field => candidate.Get(field.Key) == field.Value), scenario + " viewing redistributed prices or rewrote source fields");
+                    Assert(editor.ResultRecord == null, scenario + " viewing saved the act"); editor.Close();
+                }
+                SameSource(store, multiple, multiRevision, multiBytes, scenario + " card disposal");
+            }
         }
         public static void Run(string tempdir)
         {
@@ -188,7 +390,8 @@ namespace WorkLedger
                 Works(editor).RefreshTotals(); var preview = editor.PrepareRecord();
                 Assert(Store.IsExternalAct(preview) && preview.Get("amount") == "10.00", "external card lost accounting scope");
             }
-            Console.WriteLine("PASS: act card separate rows, legacy nullable prices, live totals/rounding, reference autofill/overrides, optional dates, snapshots, atomic preview/cancel, hourly conversion, external acts.");
+            TestFullDescriptionReadAccess(store, party.Id);
+            Console.WriteLine("PASS: act card full legacy-description reading/selection, reachable work rows, separate rows, legacy nullable prices, live totals/rounding, reference autofill/overrides, optional dates, snapshots, atomic preview/cancel, hourly conversion, external acts.");
         }
     }
 }

@@ -30,7 +30,7 @@ namespace WorkLedger
             var commands = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(18, 4, 18, 8), WrapContents = true };
             commands.Controls.Add(MakeButton("Загрузить файл сверки", ImportFile, 200));
             filter.Width = 220; filter.DropDownStyle = ComboBoxStyle.DropDownList; filter.Margin = new Padding(7, 6, 10, 0);
-            filter.Items.AddRange(new object[] { "Все записи", "Требует проверки", "Найдена связь", "Проверено" }); filter.SelectedIndex = 1;
+            filter.Items.AddRange(new object[] { "Все записи", "Не проверено", "Найдена связь", "Проверено" }); filter.SelectedIndex = 1;
             filter.SelectedIndexChanged += delegate { Reload(); }; commands.Controls.Add(filter);
             commands.Controls.Add(MakeButton("Открыть запись", OpenSelected, 160));
             commands.Controls.Add(MakeButton("Отметить проверено", MarkChecked, 190));
@@ -41,14 +41,9 @@ namespace WorkLedger
             footer.Controls.Add(new Label { Text = "Причина проверки и сведения из исходных документов", Dock = DockStyle.Top, Height = 28 });
             grid.Dock = DockStyle.Fill; grid.ReadOnly = true; grid.AllowUserToAddRows = false; grid.AllowUserToDeleteRows = false;
             grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect; grid.MultiSelect = false; grid.RowHeadersVisible = false;
+            grid.SizeChanged += delegate { LedgerGridLayout.Apply(grid, "reconciliation", 0); };
             grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill; grid.BackgroundColor = Color.White; grid.BorderStyle = BorderStyle.None;
             foreach (string name in new[] { "Тип", "Дата", "Номер", "Контрагент", "Сумма", "Валюта", "Проверка" }) grid.Columns.Add(name, name);
-            grid.Columns["Контрагент"].FillWeight = 190; grid.Columns["Номер"].FillWeight = 130;
-            grid.Columns["Валюта"].FillWeight = 55; grid.Columns["Дата"].FillWeight = 80;
-            grid.Columns["Проверка"].FillWeight = 130;
-            grid.Columns["Тип"].MinimumWidth = 85; grid.Columns["Дата"].MinimumWidth = 110; grid.Columns["Валюта"].MinimumWidth = 90;
-            grid.Columns["Сумма"].MinimumWidth = 105; grid.Columns["Проверка"].MinimumWidth = 160;
-            grid.Columns["Номер"].MinimumWidth = 130; grid.Columns["Контрагент"].MinimumWidth = 200;
             grid.SelectionChanged += delegate { ShowDetails(); }; grid.CellDoubleClick += delegate { Run(OpenSelected); };
             var content = new Panel { Dock = DockStyle.Fill, Padding = new Padding(18, 0, 18, 0) }; content.Controls.Add(grid);
             Controls.Add(content); Controls.Add(footer); Controls.Add(commands); Controls.Add(header);
@@ -65,7 +60,17 @@ namespace WorkLedger
         }
         public static string ReviewLabel(string value)
         {
-            return value == "pending" ? "Требует проверки" : value == "matched" ? "Найдена связь" : value == "checked" ? "Проверено" : "";
+            return value == "checked" ? "Проверено" : value == "pending" ? "Требует проверки"
+                : value == "matched" ? "Не проверено · связь найдена" : "Не проверено";
+        }
+        public static bool NeedsReview(Record record)
+        {
+            return record != null && record.Get("reviewStatus") != "checked";
+        }
+        public static bool IsReviewRecord(Record record)
+        {
+            return record != null && (record.Kind == "act" || record.Kind == "payment"
+                || record.Kind == "document" && (record.Get("reviewStatus") != "" || record.Get("reviewPackageId") != "" || record.Get("reviewNotes") != ""));
         }
         private Record Selected()
         {
@@ -74,10 +79,10 @@ namespace WorkLedger
         public void Reload()
         {
             string selected = grid.SelectedRows.Count == 0 ? "" : Convert.ToString(grid.SelectedRows[0].Tag);
-            var all = store.Records.Where(r => new[] { "act", "payment", "document" }.Contains(r.Kind) && r.Get("reviewStatus") != "").ToList();
+            var all = store.Records.Where(IsReviewRecord).ToList();
             string state = filter.SelectedIndex == 1 ? "pending" : filter.SelectedIndex == 2 ? "matched" : filter.SelectedIndex == 3 ? "checked" : "";
             grid.Rows.Clear();
-            foreach (Record record in all.Where(r => state == "" || r.Get("reviewStatus") == state).OrderByDescending(r => r.Get("date")).ThenBy(r => r.Get("number")))
+            foreach (Record record in all.Where(r => filter.SelectedIndex == 1 ? NeedsReview(r) : state == "" || r.Get("reviewStatus") == state).OrderByDescending(r => r.Get("date")).ThenBy(r => r.Get("number")))
             {
                 Record party = store.Find(record.Get("partyId")); DateTime date;
                 string day = DateTime.TryParseExact(record.Get("date"), "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out date) ? date.ToString("dd.MM.yyyy") : record.Get("date");
@@ -85,11 +90,12 @@ namespace WorkLedger
                 int row = grid.Rows.Add(record.Kind == "act" ? "Акт" : record.Kind == "payment" ? "Оплата" : "Документ", day,
                     record.Get("number") == "" ? record.Get("title") : record.Get("number"), party == null ? "" : party.Get("name"), amount, record.Get("currency"), ReviewLabel(record.Get("reviewStatus")));
                 grid.Rows[row].Tag = record.Id;
-                if (record.Get("reviewStatus") == "pending") grid.Rows[row].DefaultCellStyle.BackColor = Color.FromArgb(255, 248, 224);
+                if (NeedsReview(record)) grid.Rows[row].DefaultCellStyle.BackColor = Color.FromArgb(255, 248, 224);
                 if (record.Id == selected) grid.Rows[row].Selected = true;
             }
             summary.Text = all.Count == 0 ? "Загрузите файл сверки. Записи появятся здесь вместе с причинами проверки."
-                : "Записей: " + all.Count + " · Требует проверки: " + all.Count(r => r.Get("reviewStatus") == "pending") + " · Зачёт оплат выполняется отдельно.";
+                : "Записей: " + all.Count + " · Не проверено: " + all.Count(NeedsReview) + " · Зачёт оплат выполняется отдельно.";
+            LedgerGridLayout.Apply(grid, "reconciliation", 0);
             ShowDetails();
         }
         private void ShowDetails()

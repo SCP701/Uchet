@@ -13,15 +13,20 @@ namespace WorkLedger
         private readonly TextBox amountInput, descriptionInput, hoursInput;
         private readonly DataGridView items = new DataGridView();
         private readonly CheckBox manualPricing = new CheckBox();
+        private readonly Button fullDescription = new UiButton();
         private readonly TextBox caption = new TextBox();
         private readonly Label totals = new Label(), guidance = new Label(), currency = new Label();
         private bool loading;
+        private bool sizingRows;
+        private bool previewResizePending;
+        private int previewHandleGeneration;
         private string lastManualAmount;
         private string originalRows;
         private bool originalManual;
         private string originalCaption;
         private static readonly CultureInfo Russian = CultureInfo.GetCultureInfo("ru-RU");
         public DataGridView WorkGrid { get { return items; } }
+        public Button FullDescriptionButton { get { return fullDescription; } }
         public bool IsManualPricing { get { return manualPricing.Checked; } }
         public event EventHandler TotalsChanged;
 
@@ -38,13 +43,16 @@ namespace WorkLedger
             heading.Controls.Add(caption, 1, 0);
             heading.Controls.Add(new Label { Text = "Необязательно. Каждая выполненная работа — в отдельной строке ниже.",
                 AutoSize = true, ForeColor = Color.FromArgb(100, 116, 139), Margin = new Padding(0, 7, 0, 0) }, 1, 1);
-            var commands = new TableLayoutPanel { Dock = DockStyle.Top, Height = 41, ColumnCount = 3 };
-            commands.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 159));
-            commands.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 149));
-            commands.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            var add = new UiButton { Text = "+ Добавить работу", Dock = DockStyle.Fill, Margin = new Padding(0, 0, 8, 5) };
-            var remove = new UiButton { Text = "Удалить работу", Dock = DockStyle.Fill, Margin = new Padding(0, 0, 8, 5) };
+            var commands = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                MinimumSize = new Size(0, 41), WrapContents = true, Margin = new Padding(0) };
+            var add = new UiButton { Text = "+ Добавить работу", Width = 159, Height = 36, Margin = new Padding(0, 0, 8, 5) };
+            var remove = new UiButton { Text = "Удалить работу", Width = 149, Height = 36, Margin = new Padding(0, 0, 8, 5) };
             add.Click += delegate { AddRow(); }; remove.Click += delegate { RemoveRows(); };
+            fullDescription.Name = "showFullWorkDescription"; fullDescription.Text = "Полное описание";
+            fullDescription.AccessibleName = "Показать полное описание выбранной работы";
+            fullDescription.CausesValidation = false;
+            fullDescription.Width = 170; fullDescription.Height = 36; fullDescription.Margin = new Padding(0, 0, 8, 5);
+            fullDescription.Click += delegate { ShowFullDescription(); };
             manualPricing.Text = "Общая сумма без цен по строкам"; manualPricing.AutoSize = true;
             manualPricing.Anchor = AnchorStyles.Right; manualPricing.Margin = new Padding(0, 3, 0, 8);
             manualPricing.CheckedChanged += delegate
@@ -54,7 +62,7 @@ namespace WorkLedger
                 else lastManualAmount = amountInput.Text;
                 ApplyMode(); RefreshTotals();
             };
-            commands.Controls.Add(add, 0, 0); commands.Controls.Add(remove, 1, 0); commands.Controls.Add(manualPricing, 2, 0);
+            commands.Controls.Add(add); commands.Controls.Add(remove); commands.Controls.Add(fullDescription); commands.Controls.Add(manualPricing);
 
             items.Dock = DockStyle.Fill; items.BackgroundColor = Color.White; items.BorderStyle = BorderStyle.FixedSingle;
             items.AllowUserToAddRows = false; items.AllowUserToDeleteRows = false; items.RowHeadersVisible = false;
@@ -64,7 +72,7 @@ namespace WorkLedger
             items.ColumnHeadersDefaultCellStyle.Font = new Font(Font, FontStyle.Bold);
             items.DefaultCellStyle.WrapMode = DataGridViewTriState.True; items.DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleLeft;
             items.AlternatingRowsDefaultCellStyle.BackColor = Color.FromArgb(247, 249, 251);
-            items.RowTemplate.Height = 39; items.AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.AllCells;
+            items.RowTemplate.Height = 39; items.AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.None;
             items.AccessibleName = "Работы акта отдельными пунктами";
             items.Columns.Add(new DataGridViewTextBoxColumn { Name = "number", HeaderText = "№", Width = 43, ReadOnly = true });
             items.Columns.Add(new DataGridViewTextBoxColumn { Name = "description", HeaderText = "Выполненная работа", AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill, MinimumWidth = 220, MaxInputLength = 2000 });
@@ -78,6 +86,12 @@ namespace WorkLedger
             items.Columns["amount"].DefaultCellStyle.BackColor = Color.FromArgb(240, 244, 249);
             items.CellValueChanged += delegate { if (!loading) RefreshTotals(); };
             items.RowsRemoved += delegate { if (!loading) RefreshTotals(); };
+            items.RowsAdded += delegate { QueuePreviewRows(); };
+            items.SizeChanged += delegate { QueuePreviewRows(); };
+            items.ColumnWidthChanged += delegate { QueuePreviewRows(); };
+            items.FontChanged += delegate { QueuePreviewRows(); };
+            items.HandleCreated += delegate { QueuePreviewRows(); };
+            items.HandleDestroyed += delegate { ++previewHandleGeneration; previewResizePending = false; };
             items.EditingControlShowing += delegate(object sender, DataGridViewEditingControlShowingEventArgs e)
             {
                 TextBox edit = e.Control as TextBox;
@@ -133,6 +147,45 @@ namespace WorkLedger
         }
 
         private void EditingTextChanged(object sender, EventArgs e) { if (!loading) RefreshTotals(); }
+        private void ShowFullDescription()
+        {
+            DataGridViewRow row = items.CurrentCell == null ? items.SelectedRows.Cast<DataGridViewRow>().FirstOrDefault() : items.CurrentCell.OwningRow;
+            if (row == null) return;
+            string text = Convert.ToString(CellValue(row, "description"));
+            using (var dialog = new ActWorkDescriptionDialog(text, row.Index + 1)) dialog.ShowDialog(FindForm());
+        }
+        private void QueuePreviewRows()
+        {
+            if (loading || previewResizePending || IsDisposed || Disposing || items.IsDisposed || items.Disposing || !items.IsHandleCreated) return;
+            previewResizePending = true;
+            int generation = previewHandleGeneration;
+            // Fill-column layout forbids changing row heights during ColumnWidthChanged.
+            items.BeginInvoke(new MethodInvoker(delegate
+            {
+                if (generation != previewHandleGeneration) return;
+                previewResizePending = false;
+                if (IsDisposed || Disposing || items.IsDisposed || items.Disposing || !items.IsHandleCreated) return;
+                FitPreviewRows();
+            }));
+        }
+        public void FitPreviewRows()
+        {
+            if (loading || sizingRows || IsDisposed || Disposing || items.IsDisposed || items.Disposing || items.Rows.Count == 0 || items.ClientSize.Height <= items.ColumnHeadersHeight) return;
+            sizingRows = true;
+            try
+            {
+                int minimum = Math.Max(items.RowTemplate.Height, items.Font.Height + items.DefaultCellStyle.Padding.Vertical + 4);
+                int viewport = Math.Max(minimum, items.ClientSize.Height - items.ColumnHeadersHeight - SystemInformation.HorizontalScrollBarHeight - 4);
+                int maximum = Math.Max(minimum, Math.Min(180, viewport / 2));
+                foreach (DataGridViewRow row in items.Rows)
+                {
+                    int preferred = row.GetPreferredHeight(row.Index, DataGridViewAutoSizeRowMode.AllCells, true);
+                    int height = Math.Max(minimum, Math.Min(maximum, preferred));
+                    if (row.Height != height) row.Height = height;
+                }
+            }
+            finally { sizingRows = false; }
+        }
         public void SetCurrency(string value) { currency.Text = value; }
         private object CellValue(DataGridViewRow row, string key)
         {
@@ -191,13 +244,14 @@ namespace WorkLedger
                 }
                 if (!manualPricing.Checked) amountInput.Text = sum.ToString("0.00", CultureInfo.CurrentCulture);
                 totals.Text = "Работ: " + items.Rows.Count + (hours > 0 ? "   ·   Часов: " + hours.ToString("0.######", Russian) : "");
-                guidance.Text = manualPricing.Checked ? "Цены по отдельным работам не указаны. Введите подтверждённую общую сумму."
+                guidance.Text = manualPricing.Checked ? "Стоимость не распределена по строкам; используется общая сумма."
                     : valid ? "Сумма рассчитывается автоматически: количество × цена каждой работы."
                     : "Заполните количество и цену каждой работы. Итог обновляется автоматически.";
                 guidance.ForeColor = valid || manualPricing.Checked ? Color.FromArgb(100, 116, 139) : Color.FromArgb(146, 64, 14);
             }
             catch (OverflowException) { guidance.Text = "Количество или цена слишком велики."; guidance.ForeColor = Color.FromArgb(185, 28, 28); }
             finally { loading = false; }
+            QueuePreviewRows();
             if (TotalsChanged != null) TotalsChanged(this, EventArgs.Empty);
         }
         private string RowsFingerprint()

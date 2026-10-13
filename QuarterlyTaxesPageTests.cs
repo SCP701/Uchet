@@ -47,14 +47,15 @@ namespace WorkLedger
             var grid = Named<DataGridView>(page, "taxPaymentsGrid");
             Assert(grid.ClientSize.Width >= grid.Columns.GetColumnsWidth(DataGridViewElementStates.Visible), "payment columns require horizontal scrolling at " + size);
             Assert(grid.ClientSize.Height >= grid.ColumnHeadersHeight + grid.RowTemplate.Height, "payment table has no usable row at " + size);
-            foreach (string name in new[] { "taxYear", "taxQuarter", "taxCurrency", "taxPeriod", "taxReceipts", "taxAmount", "taxRemaining", "taxPaymentCount" })
+            foreach (string name in new[] { "taxMode", "taxYear", "taxQuarter", "taxFrom", "taxTo", "taxCurrency", "taxPeriod", "taxReceipts", "taxPreliminary", "taxAmount", "taxRemaining", "taxPaymentCount" })
             {
                 Control control = Named<Control>(page, name);
+                if (!control.Visible) continue;
                 Rectangle relative = page.RectangleToClient(control.RectangleToScreen(control.ClientRectangle));
                 Assert(relative.Left >= 0 && relative.Top >= 0 && relative.Right <= page.ClientSize.Width + 1 && relative.Bottom <= page.ClientSize.Height + 1,
                     name + " is clipped at " + size);
             }
-            foreach (string name in new[] { "taxReceipts", "taxAmount", "taxRemaining" })
+            foreach (string name in new[] { "taxReceipts", "taxPreliminary", "taxAmount", "taxRemaining" })
             {
                 Label label = Named<Label>(page, name);
                 Size text = TextRenderer.MeasureText(label.Text, label.Font, new Size(Int32.MaxValue, Int32.MaxValue), TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
@@ -80,8 +81,8 @@ namespace WorkLedger
                 Tuple<int, int> previous = QuarterlyTaxes.PreviousQuarter(DateTime.Today);
                 Assert(page.SelectedYear == previous.Item1 && page.SelectedQuarter == previous.Item2 && page.SelectedCurrency == "EUR", "default period/currency did not use completed quarter and organization currency");
                 page.SetPeriod(2026, 3, "EUR"); Application.DoEvents();
-                Assert(page.CurrentResult.Receipts == 1500.50m && page.CurrentResult.Tax == 300.10m && page.CurrentResult.Remaining == 1200.40m, "period selection did not refresh calculation");
-                Card(page, "taxReceipts", 1500.50m, "EUR"); Card(page, "taxAmount", 300.10m, "EUR"); Card(page, "taxRemaining", 1200.40m, "EUR");
+                Assert(page.CurrentResult.Receipts == 1500.50m && page.CurrentResult.PreliminaryTax == 300.10m && page.CurrentResult.Tax == 240.08m && page.CurrentResult.Remaining == 1200.40m, "period selection did not refresh calculation");
+                Card(page, "taxReceipts", 1500.50m, "EUR"); Card(page, "taxPreliminary", 300.10m, "EUR"); Card(page, "taxAmount", 240.08m, "EUR"); Card(page, "taxRemaining", 1200.40m, "EUR");
                 string period = Named<Label>(page, "taxPeriod").Text;
                 Assert(period.Contains("1 июля") && period.Contains("30 сентября 2026"), "selected date range is not shown explicitly");
                 var grid = Named<DataGridView>(page, "taxPaymentsGrid");
@@ -99,12 +100,56 @@ namespace WorkLedger
                 typeof(DataGridView).GetMethod("OnCellDoubleClick", BindingFlags.Instance | BindingFlags.NonPublic)
                     .Invoke(grid, new object[] { new DataGridViewCellEventArgs(0, 0) });
                 Assert(requested == bank.Id, "open-payment action uses a row index instead of sorted payment ID");
+                Named<ComboBox>(page, "taxMode").SelectedIndex = 1; Application.DoEvents();
+                Assert(page.AllTime && page.CurrentResult.AllTime && page.CurrentResult.Receipts == 1800.50m && grid.Rows.Count == 3, "mode selector missed another quarter");
+                Card(page, "taxPreliminary", 360.10m, "EUR"); Card(page, "taxRemaining", 1440.40m, "EUR"); Card(page, "taxAmount", 288.08m, "EUR");
+                Assert(!Named<NumericUpDown>(page, "taxYear").Enabled && !Named<ComboBox>(page, "taxQuarter").Enabled && Named<ComboBox>(page, "taxCurrency").Enabled,
+                    "all-time selectors must disable year/quarter while keeping currency available");
+                Assert(Named<Label>(page, "taxPeriod").Text == "Все даты поступлений", "all-time period is unclear");
+                Layout(page, form, new Size(1180, 620)); Layout(page, form, new Size(820, 450));
+                page.SetAllTime("USD"); Assert(page.CurrentResult.Receipts == 600m && page.CurrentResult.Tax == 96m && grid.Rows.Count == 1, "all-time currency mixed");
+                page.SetAllTime("RUB"); Assert(Named<Label>(page, "taxEmptyState").Visible && page.CurrentResult.PreliminaryTax == 0m && page.CurrentResult.Tax == 0m, "empty all-time did not clear amounts");
+                bool invalidAllTime = false; try { page.SetAllTime("JPY"); } catch (ArgumentException) { invalidAllTime = true; }
+                Assert(invalidAllTime && page.AllTime && page.SelectedCurrency == "RUB", "invalid all-time currency partially changed selection");
+                page.SetAllTime("EUR"); Named<ComboBox>(page, "taxMode").SelectedIndex = 0; Application.DoEvents();
+                Assert(!page.AllTime && page.SelectedYear == 2026 && page.SelectedQuarter == 3 && page.CurrentResult.Receipts == 1500.50m
+                    && Named<NumericUpDown>(page, "taxYear").Enabled && Named<ComboBox>(page, "taxQuarter").Enabled, "returning to quarter lost previous year/quarter");
+                var rangeFrom = Named<DateTimePicker>(page, "taxFrom"); var rangeTo = Named<DateTimePicker>(page, "taxTo");
+                Named<ComboBox>(page, "taxMode").SelectedIndex = 2; Application.DoEvents();
+                Assert(page.CustomPeriod && rangeFrom.Visible && rangeTo.Visible && !Named<NumericUpDown>(page, "taxYear").Visible && !Named<ComboBox>(page, "taxQuarter").Visible,
+                    "custom mode must show date selectors in place of quarter selectors");
+                page.SetDateRange(new DateTime(2026, 8, 15), new DateTime(2026, 10, 1), "EUR");
+                Assert(page.CustomPeriod && page.CurrentResult.CustomPeriod && page.CurrentResult.Receipts == 550m && grid.Rows.Count == 2, "manual range endpoints not included");
+                Card(page, "taxPreliminary", 110m, "EUR"); Card(page, "taxRemaining", 440m, "EUR"); Card(page, "taxAmount", 88m, "EUR");
+                Assert(Named<Label>(page, "taxPeriod").Text == "15.08.2026 — 01.10.2026", "custom range not shown explicitly");
+                Layout(page, form, new Size(1180, 620)); Layout(page, form, new Size(820, 450));
+                rangeTo.Value = new DateTime(2026, 8, 15); Application.DoEvents();
+                Assert(page.CurrentResult.Receipts == 250m && page.CurrentResult.Tax == 40m && grid.Rows.Count == 1, "changing end date must recalculate same-day range");
+                rangeFrom.Value = new DateTime(2026, 10, 1); Application.DoEvents();
+                Assert(page.SelectedFromDate == page.SelectedToDate && page.SelectedToDate == new DateTime(2026, 10, 1) && page.CurrentResult.Receipts == 300m,
+                    "moving start after end must move the end to keep a valid range");
+                rangeTo.Value = new DateTime(2026, 7, 20); Application.DoEvents();
+                Assert(page.SelectedFromDate == page.SelectedToDate && page.SelectedFromDate == new DateTime(2026, 7, 20) && page.CurrentResult.Receipts == 1250.50m,
+                    "moving end before start must move the start to keep a valid range");
+                bool invalidRange = false; try { page.SetDateRange(new DateTime(2026, 10, 1), new DateTime(2026, 7, 1), "EUR"); } catch (ArgumentException) { invalidRange = true; }
+                Assert(invalidRange && page.CustomPeriod && page.SelectedFromDate == new DateTime(2026, 7, 20) && page.CurrentResult.Receipts == 1250.50m, "invalid range partially changes page");
+                invalidRange = false; try { page.SetDateRange(new DateTime(2026, 8, 15), new DateTime(2026, 10, 1), "JPY"); } catch (ArgumentException) { invalidRange = true; }
+                Assert(invalidRange && page.SelectedCurrency == "EUR" && page.SelectedFromDate == new DateTime(2026, 7, 20), "invalid currency partially changes range");
+                invalidRange = false; try { page.SetDateRange(DateTime.MinValue, new DateTime(2026, 10, 1), "EUR"); } catch (ArgumentOutOfRangeException) { invalidRange = true; }
+                Assert(invalidRange && page.SelectedFromDate == new DateTime(2026, 7, 20), "unsupported picker date partially changes page");
+                page.SetDateRange(new DateTime(2026, 8, 15), new DateTime(2026, 10, 1), "RUB");
+                Assert(Named<Label>(page, "taxEmptyState").Visible && page.CurrentResult.Tax == 0m && grid.Rows.Count == 0, "empty custom range retains old data");
+                page.SetAllTime("EUR"); Assert(page.CurrentResult.Receipts == 1800.50m && !rangeFrom.Visible && !rangeTo.Visible, "all-time mode must ignore saved custom dates");
+                page.SetPeriod(2026, 3, "EUR"); Named<ComboBox>(page, "taxMode").SelectedIndex = 2;
+                Assert(page.SelectedFromDate == new DateTime(2026, 8, 15) && page.SelectedToDate == new DateTime(2026, 10, 1) && page.CurrentResult.Receipts == 550m, "saved custom dates lost after other modes");
+                Unchanged(store, original, revision, "custom range selection and date changes");
+                page.SetPeriod(2026, 3, "EUR");
                 Named<ComboBox>(page, "taxQuarter").SelectedIndex = 3; Application.DoEvents();
                 Assert(page.CurrentResult.Receipts == 300m && grid.Rows.Count == 1 && Convert.ToString(grid.Rows[0].Cells["method"].Value) == "Другое", "changing the quarter did not refresh receipts");
                 Named<ComboBox>(page, "taxCurrency").SelectedItem = "RUB"; Application.DoEvents();
                 Assert(page.CurrentResult.Receipts == 0 && page.CurrentResult.Tax == 0 && page.CurrentResult.Remaining == 0 && grid.Rows.Count == 0, "empty quarter did not clear old data");
                 Assert(Named<Label>(page, "taxEmptyState").Visible && !grid.Visible, "empty quarter did not show a friendly state");
-                Card(page, "taxReceipts", 0, "RUB"); Card(page, "taxAmount", 0, "RUB"); Card(page, "taxRemaining", 0, "RUB");
+                Card(page, "taxReceipts", 0, "RUB"); Card(page, "taxPreliminary", 0, "RUB"); Card(page, "taxAmount", 0, "RUB"); Card(page, "taxRemaining", 0, "RUB");
                 page.SetPeriod(2026, 3, "EUR"); page.RefreshData();
                 Unchanged(store, original, revision, "constructing/selecting/sorting/refreshing the tax page");
                 Payment(store, party, "П-006", "2026-09-30", "EUR", "income", "1000.00", "bank", false);
@@ -112,13 +157,22 @@ namespace WorkLedger
                 page.RefreshData();
                 Assert(page.SelectedYear == 2026 && page.SelectedQuarter == 3 && page.SelectedCurrency == "EUR" && page.CurrentResult.Receipts == 2500.50m && grid.Rows.Count == 3,
                     "refresh missed new payments or reset own selectors");
-                Card(page, "taxAmount", 500.10m, "EUR");
+                Card(page, "taxPreliminary", 500.10m, "EUR"); Card(page, "taxAmount", 400.08m, "EUR");
                 Unchanged(store, original, revision, "refreshing after a new receipt");
                 bool rejected = false; try { page.SetPeriod(2026, 5, "EUR"); } catch (ArgumentOutOfRangeException) { rejected = true; }
                 Assert(rejected && page.SelectedQuarter == 3 && page.CurrentResult.Receipts == 2500.50m, "invalid period partly changed the page");
+                page.SetAllTime("EUR");
+                Assert(page.CurrentResult.Receipts == 2800.50m && grid.Rows.Count == 4, "all-time refresh misses new receipts");
+                Card(page, "taxPreliminary", 560.10m, "EUR"); Card(page, "taxRemaining", 2240.40m, "EUR"); Card(page, "taxAmount", 448.08m, "EUR");
+                Unchanged(store, original, revision, "all-time recalculation after new receipt");
+                Payment(store, party, "LARGE", "2020-01-01", "RUB", "income", "999999999999.99", "bank", false);
+                original = File.ReadAllBytes(store.DataPath); revision = store.Revision;
+                page.SetAllTime("RUB"); Layout(page, form, new Size(1180, 620)); Layout(page, form, new Size(820, 450));
+                Card(page, "taxPreliminary", 200000000000m, "RUB"); Card(page, "taxRemaining", 799999999999.99m, "RUB"); Card(page, "taxAmount", 160000000000m, "RUB");
+                Unchanged(store, original, revision, "large receipt all-time layout");
                 form.Close();
             }
-            File.WriteAllText(Path.Combine(root, "quarterly-taxes-page-result.txt"), "PASS: default period/currency, selector refresh, cards, typed numeric sorting and payment identity, archive receipts, empty state, responsive layout, read-only ledger and refresh after new receipt");
+            File.WriteAllText(Path.Combine(root, "quarterly-taxes-page-result.txt"), "PASS: custom date selection, inclusive endpoints, automatic date adjustment, invalid ranges, saved dates, default period/currency, selector refresh, cards, typed numeric sorting and payment identity, archive receipts, empty state, responsive layout, read-only ledger and refresh after new receipt");
         }
     }
 }

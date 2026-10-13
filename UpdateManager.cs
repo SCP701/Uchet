@@ -35,7 +35,7 @@ namespace WorkLedger
                 if (new FileInfo(path).Length > 8192) throw new InvalidDataException();
                 var config = new JavaScriptSerializer().Deserialize<UpdateConfiguration>(File.ReadAllText(path, Encoding.UTF8));
                 if (config == null) return new UpdateConfiguration { Repository = UpdateDefaults.Repository };
-                if (!String.IsNullOrEmpty(config.Repository)) config.Repository = UpdateProtocol.NormalizeRepository(config.Repository);
+                config.Repository = String.IsNullOrWhiteSpace(config.Repository) ? UpdateDefaults.Repository : UpdateProtocol.NormalizeRepository(config.Repository);
                 return config;
             }
             catch { return new UpdateConfiguration { Repository = UpdateDefaults.Repository }; }
@@ -54,22 +54,39 @@ namespace WorkLedger
         }
         public static async void CheckInBackground(Form owner, Store store, Action<bool> notify)
         {
-            var config = ReadConfiguration(store.DataDir);
-            if (String.IsNullOrEmpty(config.Repository)) return;
-            Version cached;
-            if (Version.TryParse(config.AvailableVersion, out cached) && cached > new Version(CurrentVersion)) notify(true);
-            DateTime last;
-            if (DateTime.TryParse(config.LastCheckUtc, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out last) && DateTime.UtcNow - last.ToUniversalTime() < TimeSpan.FromDays(1)) return;
+            await CheckInBackgroundAsync(owner, store, notify, delegate(string repo, string version) { return new GitHubUpdateClient().Check(repo, version); });
+        }
+        internal static bool HasNewerVersion(string version)
+        {
+            Version candidate;
+            return Version.TryParse(version, out candidate) && candidate > new Version(CurrentVersion);
+        }
+        internal static async Task CheckInBackgroundAsync(Form owner, Store store, Action<bool> notify, Func<string, string, ReleaseUpdate> check)
+        {
             try
             {
-                config.LastCheckUtc = DateTime.UtcNow.ToString("o"); SaveConfiguration(store.DataDir, config);
-                var update = await Task.Run(delegate { return new GitHubUpdateClient().Check(config.Repository, CurrentVersion); });
-                if (ReadConfiguration(store.DataDir).Repository != config.Repository) return;
-                config.AvailableVersion = update == null ? "" : update.Manifest.Version;
-                SaveConfiguration(store.DataDir, config);
-                if (!owner.IsDisposed) notify(update != null);
+                if (owner.IsDisposed || owner.Disposing) return;
+                var config = ReadConfiguration(store.DataDir);
+                notify(HasNewerVersion(config.AvailableVersion));
+                // Each application launch checks again, including after an offline launch.
+                // The cached notice stays visible while the network request runs.
+                var update = await Task.Run(delegate { return check(config.Repository, CurrentVersion); });
+                if (owner.IsDisposed || owner.Disposing) return;
+                if (!SaveCheckResult(store.DataDir, config.Repository, update)) return;
+                notify(update != null && HasNewerVersion(update.Manifest.Version));
             }
-            catch { /* An offline accounting session proceeds without an update prompt. */ }
+            catch { /* An offline accounting session keeps its cached notice and remains usable. */ }
+        }
+        internal static bool SaveCheckResult(string dataDir, string repository, ReleaseUpdate update)
+        {
+            var config = ReadConfiguration(dataDir);
+            if (config.Repository != repository) return false;
+            if (update != null && (update.Manifest.MinDataVersion > 1 || update.Manifest.MaxDataVersion < 1))
+                throw new InvalidDataException("Этот выпуск использует другой формат базы. Для него требуется отдельный перенос данных.");
+            config.LastCheckUtc = DateTime.UtcNow.ToString("o");
+            config.AvailableVersion = update != null && HasNewerVersion(update.Manifest.Version) ? update.Manifest.Version : "";
+            SaveConfiguration(dataDir, config);
+            return true;
         }
         public static void Show(Form owner, Store store, Action<bool> notify)
         {
@@ -154,9 +171,9 @@ namespace WorkLedger
     {
         private readonly Store store;
         private readonly Action<bool> notify;
-        private TextBox repository = new TextBox(), notes = new TextBox();
+        private TextBox notes = new TextBox();
         private Label status = new Label(), version = new Label();
-        private Button check = new Button(), install = new Button(), save = new Button();
+        private Button check = new Button(), install = new Button();
         private ProgressBar progress = new ProgressBar();
         private ReleaseUpdate available;
         private bool busy, handedOff;
@@ -164,61 +181,46 @@ namespace WorkLedger
         public UpdateWindow(Store data, Action<bool> callback, bool checkOnShow = true)
         {
             store = data; notify = callback;
-            Text = "Обновления"; Font = new Font("Segoe UI", 10); Size = new Size(740, 590);
+            Text = "Обновления"; Font = new Font("Segoe UI", 10); Size = new Size(740, 560);
             MinimumSize = MaximumSize = Size; StartPosition = FormStartPosition.CenterParent; ShowIcon = false; MaximizeBox = MinimizeBox = false;
             BackColor = Color.FromArgb(246, 249, 251);
             var title = new Label { Text = "Обновления программы", Font = new Font("Segoe UI", 20, FontStyle.Bold), Left = 24, Top = 20, Width = 670, Height = 42 };
             version.SetBounds(26, 69, 660, 26); version.Text = "Установлена версия " + new Version(UpdateManager.CurrentVersion).ToString(3);
-            var repoLabel = new Label { Text = "Источник обновлений — GitHub", Left = 26, Top = 110, Width = 660, Height = 26 };
-            repository.SetBounds(26, 141, 490, 30); repository.Text = UpdateManager.ReadConfiguration(store.DataDir).Repository;
-            save.SetBounds(531, 138, 168, 35); save.Text = "Сохранить";
-            save.Click += delegate { try { SaveSource(); status.Text = "Адрес сохранён. Нажмите «Проверить обновления»."; } catch (Exception ex) { ShowError(ex); } };
-            status.SetBounds(26, 190, 672, 48); status.Text = repository.Text == "" ? "После создания репозитория сохраните его ссылку здесь." : "Можно проверить, доступна ли новая версия.";
-            notes.SetBounds(26, 246, 673, 160); notes.Multiline = true; notes.ReadOnly = true; notes.ScrollBars = ScrollBars.Vertical; notes.BackColor = Color.White;
+            var automatic = new Label { Text = "Программа проверяет обновления при каждом запуске.\r\nНовую версию можно установить в этом окне.", Left = 26, Top = 110, Width = 672, Height = 44, ForeColor = UiStyle.Muted };
+            status.SetBounds(26, 162, 672, 48); status.Text = "Можно проверить, доступна ли новая версия.";
+            notes.SetBounds(26, 216, 673, 150); notes.Multiline = true; notes.ReadOnly = true; notes.ScrollBars = ScrollBars.Vertical; notes.BackColor = Color.White;
             notes.Text = "При обновлении база и вложения сохраняются отдельно.\r\nПеред заменой программы будет создана резервная копия.\r\nБез интернета учёт продолжает работать.";
-            progress.SetBounds(26, 422, 673, 12); progress.Visible = false; progress.Style = ProgressBarStyle.Marquee; progress.MarqueeAnimationSpeed = 25;
-            check.SetBounds(26, 454, 225, 38); check.Text = "Проверить обновления"; check.Click += async delegate { await Check(); };
-            install.SetBounds(457, 454, 241, 38); install.Text = "Обновить"; install.Enabled = false; install.BackColor = Color.FromArgb(0, 119, 116); install.ForeColor = Color.White;
+            progress.SetBounds(26, 382, 673, 12); progress.Visible = false; progress.Style = ProgressBarStyle.Marquee; progress.MarqueeAnimationSpeed = 25;
+            check.SetBounds(26, 412, 225, 38); check.Text = "Проверить обновления"; check.Click += async delegate { await Check(); };
+            install.SetBounds(457, 412, 241, 38); install.Text = "Обновить"; install.Enabled = false; install.BackColor = Color.FromArgb(0, 119, 116); install.ForeColor = Color.White;
             install.Click += async delegate { await Install(); };
-            var releaseLink = new LinkLabel { Text = "Страница выпусков", Left = 268, Top = 465, Width = 180, Height = 24 };
-            releaseLink.LinkClicked += delegate { try { string repo = UpdateProtocol.NormalizeRepository(repository.Text); Process.Start(new ProcessStartInfo("https://github.com/" + repo + "/releases") { UseShellExecute = true }); } catch (Exception ex) { ShowError(ex); } };
-            var footer = new Label { Text = "Обновление выполнится после закрытия текущего окна учёта.", Left = 26, Top = 511, Width = 680, Height = 26, ForeColor = Color.FromArgb(93, 107, 124) };
-            Controls.AddRange(new Control[] { title, version, repoLabel, repository, save, status, notes, progress, check, install, releaseLink, footer });
-            repository.TextChanged += delegate { available = null; install.Enabled = false; };
-            Shown += async delegate { if (checkOnShow && !String.IsNullOrWhiteSpace(repository.Text)) await Check(); };
+            var footer = new Label { Text = "Обновление выполнится после закрытия текущего окна учёта.", Left = 26, Top = 468, Width = 680, Height = 42, ForeColor = UiStyle.Muted };
+            Controls.AddRange(new Control[] { title, version, automatic, status, notes, progress, check, install, footer });
+            Shown += async delegate { if (checkOnShow) await Check(); };
             FormClosing += delegate(object sender, FormClosingEventArgs e) { if (busy && !handedOff) e.Cancel = true; };
-        }
-        private void SaveSource()
-        {
-            string repo = UpdateProtocol.NormalizeRepository(repository.Text);
-            var config = UpdateManager.ReadConfiguration(store.DataDir);
-            if (config.Repository != repo) { config.LastCheckUtc = ""; config.AvailableVersion = ""; }
-            config.Repository = repo; UpdateManager.SaveConfiguration(store.DataDir, config); repository.Text = repo;
         }
         private void SetBusy(bool value, string message)
         {
-            busy = value; progress.Visible = value; check.Enabled = save.Enabled = repository.Enabled = !value; install.Enabled = !value && available != null;
+            busy = value; progress.Visible = value; check.Enabled = !value; install.Enabled = !value && available != null;
             if (message != null) status.Text = message;
         }
         private void ShowError(Exception ex)
         {
-            status.Text = ex.Message; status.ForeColor = Color.Firebrick;
+            status.Text = ex is System.Net.WebException ? "Сервис обновлений сейчас недоступен. Проверьте интернет и попробуйте ещё раз." : ex.Message; status.ForeColor = Color.Firebrick;
         }
         private async Task Check()
         {
             try
             {
-                SaveSource(); status.ForeColor = SystemColors.ControlText; SetBusy(true, "Проверяем новые версии…");
-                string repo = UpdateProtocol.NormalizeRepository(repository.Text);
+                status.ForeColor = SystemColors.ControlText; SetBusy(true, "Проверяем новые версии…");
+                string repo = UpdateManager.ReadConfiguration(store.DataDir).Repository;
                 available = await Task.Run(delegate { return new GitHubUpdateClient().Check(repo, UpdateManager.CurrentVersion); });
-                var config = UpdateManager.ReadConfiguration(store.DataDir); config.LastCheckUtc = DateTime.UtcNow.ToString("o"); config.AvailableVersion = available == null ? "" : available.Manifest.Version;
-                UpdateManager.SaveConfiguration(store.DataDir, config);
-                if (available == null) { status.Text = "У вас установлена последняя доступная версия."; notify(false); }
+                if (!UpdateManager.SaveCheckResult(store.DataDir, repo, available)) throw new InvalidOperationException("Настройки обновлений изменились. Проверьте обновления ещё раз.");
+                if (available == null || !UpdateManager.HasNewerVersion(available.Manifest.Version)) { available = null; status.Text = "У вас установлена последняя доступная версия."; notify(false); }
                 else
                 {
-                    if (available.Manifest.MinDataVersion > 1 || available.Manifest.MaxDataVersion < 1) throw new InvalidDataException("Этот выпуск использует другой формат базы. Для него требуется отдельный перенос данных.");
                     status.Text = "Доступна версия " + new Version(available.Manifest.Version).ToString(3) + ". Для установки нажмите «Обновить».";
-                    notes.Text = String.IsNullOrWhiteSpace(available.Notes) ? "Выпуск готов к установке. Подробности — на странице выпусков." : available.Notes;
+                    notes.Text = String.IsNullOrWhiteSpace(available.Notes) ? "Выпуск готов к установке. База и вложения будут сохранены." : available.Notes;
                     notify(true);
                 }
             }

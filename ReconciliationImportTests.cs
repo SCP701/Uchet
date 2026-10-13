@@ -36,6 +36,46 @@ namespace WorkLedger
             foreach (string key in new[] { "number", "date", "partyId", "amount", "currency", "direction", "status", "signatureStatus", "notes", "archived", "actId", "method", "paymentScope" })
                 Assert(before.Get(key) == after.Get(key), "protected field changed: " + key);
         }
+        private static void NewRecordsKeepEveryReviewState(string root)
+        {
+            var store = new Store(Path.Combine(root, "all-review-state-import"));
+            var client = Party("review-state-client");
+            var entries = new List<ReconciliationEntry> { new ReconciliationEntry { Record = client } };
+            var sourceRecords = new List<Record>();
+            string[] states = { "pending", "matched", "checked" };
+            for (int index = 0; index < states.Length; index++)
+            {
+                var act = Act("review-state-act-" + index, client.Id);
+                act.Set("number", "REVIEW-" + index); act.Set("reviewStatus", states[index]);
+                act.Set("reviewNotes", "Состояние исходной сверки " + states[index]);
+                var payment = new Record("payment") { Id = "review-state-payment-" + index };
+                foreach (string field in new[] { "date", "partyId", "amount", "currency", "direction" }) payment.Set(field, act.Get(field));
+                payment.Set("number", "0000" + index); payment.Set("method", "bank"); payment.Set("paymentScope", "standard");
+                payment.Set("reviewStatus", states[index]); payment.Set("reviewNotes", "Проверить позже в списке.");
+                payment.Set("candidateActIds", act.Id);
+                sourceRecords.Add(act); sourceRecords.Add(payment);
+                entries.Add(new ReconciliationEntry { Record = act }); entries.Add(new ReconciliationEntry { Record = payment });
+            }
+            var package = Package(entries.ToArray()); string sourceBefore = Json(package);
+            ReconciliationPlan preview = ReconciliationImport.PlanReadOnly(store, package);
+            Assert(preview.NewCount == 7 && preview.Records.Count == 7, "new import filtered pending/matched/checked source records");
+            Assert(Json(package) == sourceBefore && !File.Exists(store.DataPath), "all-state preview wrote the database or changed its source");
+            ReconciliationImport.Apply(store, preview);
+            Assert(store.Of("act").Count() == 3 && store.Of("payment").Count() == 3, "uncertain source records were not all imported");
+            foreach (Record source in sourceRecords)
+            {
+                Record actual = store.Find(source.Id);
+                Assert(actual != null && actual.Get("reviewStatus") == source.Get("reviewStatus"), "new record review state lost: " + source.Id);
+                SameFinancial(source, actual);
+                if (actual.Kind == "act") Assert(actual.Get("status") == "draft" && actual.Get("signatureStatus") == "unknown", "import signed an unverified act");
+                if (actual.Kind == "payment") Assert(actual.Get("actId") == "" && actual.Get("candidateActIds") == source.Get("candidateActIds"), "import turned a tentative match into an accounting link");
+            }
+            Assert(store.Of("allocation").Count() == 0, "all-state import created an allocation");
+            string saved = File.ReadAllText(store.DataPath); long revision = store.Revision;
+            ReconciliationImport.Apply(store, package);
+            Assert(store.Revision == revision && File.ReadAllText(store.DataPath) == saved, "repeated all-state import changed records or reset checked state");
+        }
+
         public static void Run(string tempdir)
         {
             string root = Path.Combine(tempdir, "reconciliation-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(root);
@@ -136,6 +176,7 @@ namespace WorkLedger
             var nextPackage = Package(Update(saved, changedTarget, "reviewNotes")); ReconciliationPlan stale = ReconciliationImport.PlanReadOnly(store, nextPackage);
             Record unrelated = Party("another-party"); store.Upsert(unrelated); string currentBytes = File.ReadAllText(store.DataPath);
             Reject(delegate { ReconciliationImport.Apply(store, stale); }, "stale preview accepted"); Assert(File.ReadAllText(store.DataPath) == currentBytes, "stale preview changed the database");
+            NewRecordsKeepEveryReviewState(root);
             Console.WriteLine("PASS: reconciliation package read-only preview, protected fields, pending conflicts, source positions, numeric and hourly rows, duplicate guards and atomic apply");
         }
     }

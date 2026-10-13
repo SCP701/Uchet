@@ -51,7 +51,7 @@ namespace WorkLedger
         public List<AuditEntry> Audit { get; set; }
     }
 
-    public sealed class Store
+    public sealed partial class Store
     {
         private static readonly string[] Kinds = { "party", "project", "contract", "amendment", "estimate", "work", "act", "invoice", "payment", "allocation", "expense", "hold", "document", "settings" };
         private static readonly string[] LinkKeys = { "partyId", "projectId", "contractId", "estimateId", "actId", "paymentId" };
@@ -373,6 +373,27 @@ namespace WorkLedger
                 if (old == null) staged.Add(candidate); else staged[staged.IndexOf(old)] = candidate;
                 Validate(staged);
                 List<AuditEntry> entries = new List<AuditEntry>();
+                // Manual confirmation explicitly applies this receipt to the act.
+                // When a previously unknown signature is confirmed, finish its pending credit.
+                if (candidate.Kind == "act" && candidate.Get("status") == "signed" && old != null && old.Get("status") != "signed")
+                {
+                    foreach (Record payment in staged.Where(r => r.Kind == "payment" && r.Get("actId") == candidate.Id && r.Get("manualAwaitingSignature") == "true").ToList())
+                    {
+                        if (String.CompareOrdinal(payment.Get("date"), DateString(DateTime.UtcNow.AddHours(3).Date)) > 0) continue;
+                        decimal credit = Math.Min(Math.Max(0, Amount(payment) - AllocatedFrom(staged, payment.Id)),
+                            Math.Max(0, Amount(candidate) - AllocatedTo(staged, candidate.Id) - Holds(staged, candidate.Id)));
+                        Record previous = payment.Clone(); payment.Set("manualAwaitingSignature", "false");
+                        entries.Add(MakeAudit("update", previous, payment));
+                        if (credit <= 0) continue;
+                        var allocation = new Record("allocation"); allocation.Set("paymentId", payment.Id); allocation.Set("actId", candidate.Id);
+                        allocation.Set("amount", MoneyString(credit)); allocation.Set("date", DateString(DateTime.UtcNow.AddHours(3).Date));
+                        allocation.Set("manualConfirmedActId", candidate.Id); staged.Add(allocation);
+                        var credited = MakeAudit("create", null, allocation);
+                        credited.Summary = "Зачтена вручную подтверждённая оплата после подтверждения подписи акта № " + candidate.Get("number") + ": " + MoneyString(credit) + " " + candidate.Get("currency");
+                        entries.Add(credited);
+                    }
+                }
+
                 if (automaticNumber) StageActCounter(staged, entries);
                 Validate(staged);
                 entries.Add(MakeAudit(old == null ? "create" : old.Get("archived") == "true" && candidate.Get("archived") != "true" ? "restore" : "update", old, candidate));
@@ -632,6 +653,10 @@ namespace WorkLedger
                 case "amount": return "Сумма"; case "currency": return "Валюта"; case "direction": return "Направление оплаты";
                 case "status": return "Статус"; case "role": return "Роль контрагента"; case "method": return "Способ оплаты";
                 case "accountingScope": return "Учёт акта"; case "paymentScope": return "Вид оплаты";
+                case "manualPaymentOrigin": return "Платёж внесён вручную"; case "manualPaymentConfirmed": return "Оплата подтверждена вручную";
+                case "manualConfirmedBy": return "Оплату подтвердил"; case "manualConfirmedUtc": return "Время подтверждения (UTC)";
+                case "manualConfirmedAmount": return "Подтверждённая сумма"; case "manualConfirmedActId": return "Акт ручного подтверждения (ID)";
+                case "manualAwaitingSignature": return "Зачесть после подтверждения подписи"; case "manualConfirmationKey": return "Идентификатор подтверждения";
                 case "category": return "Категория расхода"; case "type": return "Вид удержания"; case "qty": return "Количество";
                 case "price": return "Цена"; case "description": return "Описание"; case "title": return "Название";
                 default: return key;

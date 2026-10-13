@@ -28,11 +28,13 @@ namespace WorkLedger
                     Directory.CreateDirectory(dataDir);
                     if (CoreTests.Run(Path.Combine(dataDir, "core-tests")) != 0) throw new Exception("Не прошли проверки расчётов.");
                     AppTests.Run(Path.Combine(dataDir, "app-tests"));
+                    ManualPaymentTests.Run(Path.Combine(dataDir, "manual-payment-tests"));
                     AttachmentSafetyTests.Run(Path.Combine(dataDir, "attachment-safety-tests"));
                     ExportRegressionTests.Run(Path.Combine(dataDir, "export-regression-tests"));
                     EditorTests.Run(Path.Combine(dataDir, "editor-tests"));
                     ReconciliationImportTests.Run(Path.Combine(dataDir, "reconciliation-tests"));
                     ActCardEditorTests.Run(Path.Combine(dataDir, "act-card-editor-tests"));
+                    ReferencePickerTests.Run(Path.Combine(dataDir, "reference-picker-tests"));
                     if (HourlyActCoreTests.Run(Path.Combine(dataDir, "hourly-core-tests")) != 0) throw new Exception("Не прошли проверки почасовых актов.");
                     HourlyActComposerTests.Run(Path.Combine(dataDir, "hourly-ui-tests"));
                     HourlyActDocumentTests.Run(Path.Combine(dataDir, "hourly-document-tests"));
@@ -47,6 +49,7 @@ namespace WorkLedger
                     QuarterlyTaxesIntegrationTests.Run(Path.Combine(dataDir, "quarter-tax-integration-tests"));
                     UiPreferencesTests.Run(Path.Combine(dataDir, "ui-preferences-tests"));
                     InterfaceUiTests.Run(Path.Combine(dataDir, "interface-ui-tests"));
+                    ListLayoutTests.Run(Path.Combine(dataDir, "list-layout-tests"));
                     UiStyleTests.Run();
                     CompactToolbarTests.Run(Path.Combine(dataDir, "compact-toolbar-tests"));
                     FilterTests.Run(Path.Combine(dataDir, "filter-tests"));
@@ -59,7 +62,7 @@ namespace WorkLedger
                     MonthlyServiceIntegrationTests.Run(Path.Combine(dataDir, "monthly-integration-tests"));
                     UpdateProtocolTests.Run(Path.Combine(dataDir, "update-protocol-tests"));
                     UpdateManagerTests.Run(Path.Combine(dataDir, "update-manager-tests"));
-                    File.WriteAllText(Path.Combine(dataDir, "test-result.txt"), "PASS: accounting, import/export, backup/restore, UI, hourly acts and numbering, act XLSX/print, personal interface settings and draft preservation, monthly service acts and background scheduler, external acts, tax selection and transfers, quarterly taxes, grey and white payment parts, SR total, compact command menus, service payment email reminders, signed update protocol and update settings", Encoding.UTF8);
+                    File.WriteAllText(Path.Combine(dataDir, "test-result.txt"), "PASS: accounting, import/export, backup/restore, UI, hourly acts and numbering, act XLSX/print, personal interface settings and draft preservation, monthly service acts and background scheduler, external acts, tax selection and transfers, quarterly taxes, grey and white payment parts, SR total, compact command menus, service payment email reminders, unchecked review lists and responsive tables, manual confirmation of full and partial payments, signed update protocol and update settings", Encoding.UTF8);
                     return 0;
                 }
                 UpdateJob startupJob = null;

@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Globalization;
 using System.Linq;
 using System.Reflection;
 using System.Text;
@@ -67,8 +68,8 @@ namespace WorkLedger
                 int events = 0;
                 composer.ActSaved += delegate { events++; };
                 Assert(!composer.WorkGrid.Columns["description"].ReadOnly && !composer.WorkGrid.Columns["hours"].ReadOnly
-                    && composer.WorkGrid.Columns["rate"].ReadOnly && composer.WorkGrid.Columns["amount"].ReadOnly,
-                    "work descriptions and hours must be editable while calculated fields stay read-only");
+                    && !composer.WorkGrid.Columns["rate"].ReadOnly && composer.WorkGrid.Columns["amount"].ReadOnly,
+                    "work descriptions, hours and rates must be editable while amounts stay read-only");
                 InvalidSave(composer, store, "missing counterparty");
                 composer.SelectCounterparty(party.Id);
                 Assert(store.Revision == revision, "selecting counterparty saved an incomplete draft");
@@ -173,6 +174,222 @@ namespace WorkLedger
                     && edited.Get("notes") == "Примечание сохранённого акта", "editing work lines lost existing act data");
             }
         }
+        private static TextBox BeginRateEdit(HourlyActComposer composer, DataGridViewRow row)
+        {
+            composer.WorkGrid.CurrentCell = row.Cells["rate"];
+            composer.WorkGrid.Focus();
+            Assert(composer.WorkGrid.BeginEdit(true), "the hourly price cell cannot enter edit mode");
+            Application.DoEvents();
+            TextBox input = composer.WorkGrid.EditingControl as TextBox;
+            Assert(input != null, "the hourly price cell has no text editor");
+            return input;
+        }
+        private static void TestManualRates(string path)
+        {
+            foreach (bool external in new[] { false, true })
+            {
+                var store = new Store(Path.Combine(path, external ? "external" : "standard"));
+                Record party = Add(store, "party", "name", "Ручные ставки", "role", "client");
+                string id;
+                using (var composer = new HourlyActComposer(store, null, external))
+                {
+                    composer.SelectCounterparty(party.Id);
+                    DataGridViewRow first = Work(composer, "Настройка системы", "1,5");
+                    first.Cells["rate"].Value = "35,50";
+                    DataGridViewRow second = Work(composer, "Проверка системы", "0.5");
+                    second.Cells["rate"].Value = "40.25";
+                    Record draft = composer.BuildDraft();
+                    Assert(Store.ParseMoney(draft.Get("amount")) == 73.38m && draft.Get("hourlyRate") == "",
+                        "manual mixed hourly prices do not calculate and preserve independently without settings");
+                    Assert(store.NextActNumber == 500 && !store.Of("act").Any(), "manual preview consumed a number");
+                    Record saved = composer.SaveDraft(); id = saved.Id;
+                    var lines = Store.GetHourlyActLines(saved);
+                    Assert(Store.IsExternalAct(saved) == external && saved.Get("number") == "500"
+                        && lines[0].Rate == 35.50m && lines[1].Rate == 40.25m && lines[1].Amount == 20.13m,
+                        "saving manual prices lost rates, rounding, numbering or external scope");
+                }
+                var reload = new Store(store.DataDir);
+                Record settings = reload.Of("settings").Single().Clone();
+                settings.Set("hourlyRate", "99.00"); reload.Upsert(settings);
+                using (var existing = new HourlyActComposer(reload, reload.Find(id)))
+                {
+                    existing.RefreshDefaults();
+                    Record restored = existing.BuildDraft();
+                    var lines = Store.GetHourlyActLines(restored);
+                    Assert(lines[0].Rate == 35.50m && lines[1].Rate == 40.25m && restored.Get("hourlyRate") == ""
+                        && Store.ParseMoney(restored.Get("amount")) == 73.38m, "reopening mixed rates changed historical prices");
+                }
+            }
+        }
+        private static void TestRateValidation(string path)
+        {
+            var store = new Store(path);
+            Add(store, "settings", "name", "Проверка цены", "currency", "BYN", "hourlyRate", "35.00");
+            Record party = Add(store, "party", "name", "Заказчик", "role", "client");
+            using (var composer = new HourlyActComposer(store))
+            {
+                composer.SelectCounterparty(party.Id);
+                DataGridViewRow row = Work(composer, "Проверяемая работа", "1");
+                foreach (object invalid in new object[] { null, "", " ", "0", "-1", "+1", "35,001", "35.001",
+                    "ошибка", "NaN", "1e2", "1,000.00", "1.000,00", "1000000000000.01" })
+                {
+                    row.Cells["rate"].Value = invalid;
+                    InvalidSave(composer, store, "invalid hourly price " + (invalid == null ? "(null)" : invalid));
+                    Assert(row.Cells["amount"].Value == null, "invalid hourly price retained a calculated row amount");
+                    Assert(store.NextActNumber == 500, "invalid hourly price consumed an act number");
+                }
+                CultureInfo original = System.Threading.Thread.CurrentThread.CurrentCulture;
+                try
+                {
+                    foreach (string culture in new[] { "ru-RU", "en-US" })
+                    {
+                        System.Threading.Thread.CurrentThread.CurrentCulture = CultureInfo.GetCultureInfo(culture);
+                        foreach (string text in new[] { "1\u00a0234,50", "1\u202f234.50", "1 234.50", "1234,50", "1234.50" })
+                        {
+                            row.Cells["rate"].Value = text;
+                            Record valid = composer.BuildDraft();
+                            Assert(Store.GetHourlyActLines(valid).Single().Rate == 1234.50m
+                                && Store.ParseMoney(valid.Get("amount")) == 1234.50m,
+                                "comma, dot or spaced hourly price depends on system culture");
+                        }
+                    }
+                }
+                finally { System.Threading.Thread.CurrentThread.CurrentCulture = original; }
+                row.Cells["rate"].Value = "1000000000000";
+                Assert(Store.ParseMoney(composer.BuildDraft().Get("amount")) == 1000000000000m, "maximum permitted hourly price is rejected");
+                row.Cells["rate"].Value = "1000000000000";
+                row.Cells["hours"].Value = "2";
+                InvalidSave(composer, store, "hourly line above maximum amount");
+                row.Cells["hours"].Value = "0.1"; row.Cells["rate"].Value = "0.01";
+                InvalidSave(composer, store, "hourly line rounded to zero");
+            }
+        }
+        private static void TestRefreshInheritedRates(string path)
+        {
+            var store = new Store(path);
+            Record settings = Add(store, "settings", "name", "Обновление ставки", "currency", "BYN", "hourlyRate", "35.00");
+            Record party = Add(store, "party", "name", "Заказчик", "role", "client");
+            using (var host = new Form { ShowInTaskbar = false, Opacity = 0, Width = 1120, Height = 680 })
+            using (var composer = new HourlyActComposer(store))
+            {
+                host.Controls.Add(composer); host.Show(); Application.DoEvents(); composer.SelectCounterparty(party.Id);
+                DataGridViewRow inherited = Work(composer, "Автоматическая ставка", "1");
+                DataGridViewRow custom = Work(composer, "Особая ставка", "1"); custom.Cells["rate"].Value = "45";
+                DataGridViewRow sameAsDefault = Work(composer, "Ручная ставка равна прежней", "1");
+                TextBox sameInput = BeginRateEdit(composer, sameAsDefault); sameInput.Text = "3"; sameInput.Text = "35"; composer.WorkGrid.EndEdit();
+                DataGridViewRow blank = Work(composer, "Пустая ручная ставка", "1"); blank.Cells["rate"].Value = "";
+                DataGridViewRow invalid = Work(composer, "Неправильная ручная ставка", "1"); invalid.Cells["rate"].Value = "ошибка";
+                DataGridViewRow active = Work(composer, "Ставка в активном редакторе", "1");
+                TextBox input = BeginRateEdit(composer, active); input.Text = "70,50"; Application.DoEvents();
+                Assert(composer.WorkGrid.IsCurrentCellInEditMode, "active custom rate was prematurely committed");
+                settings.Set("hourlyRate", "60.00"); store.Upsert(settings);
+                long revision = store.Revision; composer.RefreshDefaults();
+                Assert(Convert.ToDecimal(inherited.Cells["rate"].Value) == 60m, "untouched inherited price did not refresh");
+                Assert(Convert.ToString(custom.Cells["rate"].Value) == "45" && Convert.ToString(sameAsDefault.Cells["rate"].Value) == "35",
+                    "settings refresh overwrote custom prices, including a deliberate old default price");
+                Assert(Convert.ToString(blank.Cells["rate"].Value) == "" && Convert.ToString(invalid.Cells["rate"].Value) == "ошибка",
+                    "settings refresh silently repaired invalid or blank custom prices");
+                Assert(Decimal.Parse(Convert.ToString(active.Cells["rate"].Value).Replace(',', '.'), CultureInfo.InvariantCulture) == 70.50m, "settings refresh lost active custom price");
+                Assert(store.Revision == revision, "refreshing draft prices wrote an act");
+                composer.WorkGrid.Rows.Remove(blank); composer.WorkGrid.Rows.Remove(invalid);
+                DataGridViewRow fresh = Work(composer, "Строка после обновления настройки", "1");
+                Assert(Convert.ToDecimal(fresh.Cells["rate"].Value) == 60m, "new row failed to inherit the updated default price");
+                Record saved = composer.SaveDraft();
+                Assert(Store.ParseMoney(saved.Get("amount")) == 270.50m && Store.GetHourlyActLines(saved).Select(line => line.Rate)
+                    .SequenceEqual(new[] { 60m, 45m, 35m, 70.50m, 60m }), "saving refreshed prices lost inherited or custom rates");
+                host.Close();
+            }
+        }
+        private static void TestActiveManualRateSave(string path)
+        {
+            foreach (bool external in new[] { false, true })
+            {
+                var store = new Store(Path.Combine(path, external ? "external" : "standard"));
+                Record party = Add(store, "party", "name", "Активная ячейка", "role", "client");
+                using (var host = new Form { ShowInTaskbar = false, Opacity = 0, Width = 1120, Height = 680 })
+                using (var composer = new HourlyActComposer(store, null, external))
+                {
+                    host.Controls.Add(composer); host.Show(); Application.DoEvents(); composer.SelectCounterparty(party.Id);
+                    DataGridViewRow row = Work(composer, "Ввод цены последним действием", "2");
+                    TextBox input = BeginRateEdit(composer, row); input.Text = "неверно"; Application.DoEvents();
+                    InvalidSave(composer, store, "invalid active hourly rate");
+                    Assert(store.NextActNumber == 500, "invalid active price consumed a number");
+                    input = BeginRateEdit(composer, row); input.Text = "40,25"; Application.DoEvents();
+                    Label total = (Label)typeof(HourlyActComposer).GetField("totals", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(composer);
+                    Assert(Convert.ToDecimal(row.Cells["amount"].Value) == 80.50m && total.Text.Contains(80.50m.ToString("N2"))
+                        && composer.WorkGrid.IsCurrentCellInEditMode, "typing an hourly price failed to recalculate the live row and total");
+                    Record preview = composer.BuildDraft();
+                    Assert(Store.GetHourlyActLines(preview).Single().Rate == 40.25m && store.NextActNumber == 500,
+                        "preview did not commit the final hourly price or consumed a number");
+                    input = BeginRateEdit(composer, row); input.Text = "50.75"; Application.DoEvents();
+                    Record saved = composer.SaveDraft();
+                    Assert(Store.GetHourlyActLines(saved).Single().Rate == 50.75m && Store.ParseMoney(saved.Get("amount")) == 101.50m
+                        && Store.IsExternalAct(saved) == external && saved.Get("number") == "500" && store.NextActNumber == 501,
+                        "save lost the final active hourly price, external scope or automatic number");
+                    host.Close();
+                }
+            }
+        }
+        private static void ChooseFromButton(Button button, string query, bool cancel, bool clear)
+        {
+            using (var timer = new Timer { Interval = 10 })
+            {
+                timer.Tick += delegate
+                {
+                    var dialog = Application.OpenForms.OfType<ReferencePickerDialog>().FirstOrDefault();
+                    if (dialog == null) return;
+                    timer.Stop(); dialog.Opacity = 0;
+                    dialog.SearchBox.Text = query;
+                    ((Button)dialog.Controls.Find(cancel ? "picker-cancel" : clear ? "picker-clear" : "picker-select", true).Single()).PerformClick();
+                };
+                timer.Start(); button.PerformClick();
+            }
+        }
+        private static void TestVisibleSelectionFields(string path)
+        {
+            var store = new Store(path);
+            Add(store, "settings", "name", "Исполнитель", "currency", "BYN", "hourlyRate", "35");
+            string fullName = "Общество с ограниченной ответственностью «Контрагент с длинным названием для проверки выбора»";
+            Record party = Add(store, "party", "name", fullName, "role", "client", "unp", "123456789");
+            Add(store, "party", "name", "Другой заказчик", "role", "client", "unp", "987654321");
+            Record contract = Add(store, "contract", "number", "ДОГОВОР-2026-500", "partyId", party.Id,
+                "status", "active", "currency", "BYN", "direction", "income", "date", "2026-10-13", "amount", "100");
+            long revision = store.Revision; byte[] bytes = File.ReadAllBytes(store.DataPath);
+            using (var host = new Form { Opacity = 0, ShowInTaskbar = false })
+            using (var composer = new HourlyActComposer(store))
+            {
+                host.Controls.Add(composer); host.ClientSize = new System.Drawing.Size(850, 490);
+                host.Show(); Application.DoEvents();
+                var partyButton = (Button)composer.Controls.Find("composer-counterparty-choose", true).Single();
+                var contractButton = (Button)composer.Controls.Find("composer-contract-choose", true).Single();
+                var partyValue = (Button)composer.Controls.Find("composer-counterparty-value", true).Single();
+                var contractValue = (Button)composer.Controls.Find("composer-contract-value", true).Single();
+                foreach (var size in new[] { new System.Drawing.Size(850, 490), new System.Drawing.Size(1170, 710) })
+                {
+                    host.ClientSize = size; Application.DoEvents();
+                    foreach (Button button in new[] { partyButton, contractButton, partyValue, contractValue })
+                    {
+                        Assert(button.Visible && button.Height >= 38, "reference selection button is hidden or too small");
+                        Assert(button.Parent.ClientRectangle.Contains(button.Bounds), "reference selection button is clipped");
+                    }
+                    Assert(contractValue.Width > 300, "contract name lost its dedicated wide row");
+                }
+                ChooseFromButton(partyButton, "123456789", false, false);
+                Assert(partyValue.Text == fullName && partyValue.AccessibleName.Contains(fullName), "counterparty name or accessible full value lost");
+                Assert(contractValue.Text.Contains(contract.Get("number")), "automatic compatible contract is not shown in its button");
+                DataGridViewRow row = Work(composer, "Несохранённая работа", "1,5");
+                row.Cells["rate"].Value = "42,50";
+                ChooseFromButton(contractButton, "", false, true);
+                Assert(composer.BuildDraft().Get("contractId") == "" && contractValue.Text == "Без договора", "contract clear did not update the visible field");
+                ChooseFromButton(partyValue, "987654321", true, false);
+                Record draft = composer.BuildDraft();
+                Assert(draft.Get("partyId") == party.Id && partyValue.Text == fullName, "cancel via visible value button changed the selection");
+                Assert(Store.GetHourlyActLines(draft).Single().Rate == 42.50m
+                    && row.Cells["description"].Value.ToString() == "Несохранённая работа", "reference selection lost draft work or custom price");
+                Assert(store.Revision == revision && bytes.SequenceEqual(File.ReadAllBytes(store.DataPath)), "visible selection buttons saved an incomplete act");
+                host.Close();
+            }
+        }
         public static void Run(string tempdir)
         {
             string path = Path.Combine(tempdir, "hourly-ui-" + Guid.NewGuid().ToString("N"));
@@ -181,7 +398,12 @@ namespace WorkLedger
             Record organization = Add(store, "settings", "name", "Первый исполнитель", "currency", "BYN", "hourlyRate", "35.00", "unp", "123456789");
             Record party = Add(store, "party", "name", "Первый заказчик", "role", "client", "unp", "987654321");
             Record otherParty = Add(store, "party", "name", "Другой заказчик", "role", "client");
+            TestVisibleSelectionFields(Path.Combine(path, "visible-selection-fields"));
             TestMissingRate(Path.Combine(path, "no-rate"));
+            TestManualRates(Path.Combine(path, "manual-rates"));
+            TestRateValidation(Path.Combine(path, "rate-validation"));
+            TestRefreshInheritedRates(Path.Combine(path, "inherited-prices"));
+            TestActiveManualRateSave(Path.Combine(path, "active-rate"));
             Record saved = TestSaveAndValidation(store, party);
             TestAllActsNavigation(store, party);
             TestSavedEdit(store, saved, organization, party);
@@ -205,7 +427,7 @@ namespace WorkLedger
                 && Store.GetHourlyActLines(reloaded.Find(saved.Id)).Count == 2
                 && Store.GetActSnapshot(reloaded.Find(saved.Id), "partySnapshot").Get("name") == "Первый заказчик",
                 "reloading the app lost acts, work lines, numbering or historical requisites");
-            File.WriteAllText(Path.Combine(path, "PASS.txt"), "PASS: hourly act UI, validation rollback, automatic numbering, draft cancellation, all Acts navigation, saved edits and historical requisites.", Encoding.UTF8);
+            File.WriteAllText(Path.Combine(path, "PASS.txt"), "PASS: hourly act UI, editable manual per-row rates without required default, comma/dot and strict price validation, live active-cell totals and save, inherited-price refresh preserving custom edits, validation rollback, numbering, cancellation, navigation and historical requisites.", Encoding.UTF8);
         }
     }
 }

@@ -48,13 +48,18 @@ namespace WorkLedger
                 Assert(Field<Label>(form,"title").Text=="Налоги" && page.Visible,"new navigation opens tax page");
                 Assert(!Field<DataGridView>(form,"grid").Visible && Field<DataGridView>(form,"grid").Rows.Count==0,"hidden previous grid cannot retain a stale financial selection");
                 Assert(!Field<FlowLayoutPanel>(form,"filters").Visible && !Field<FlowLayoutPanel>(form,"actions").Visible,"quarter page owns its selectors without general record actions");
-                Assert(page.CurrentResult.Receipts==10000m && page.CurrentResult.Tax==2000m && page.CurrentResult.Remaining==8000m,"unrelated search, currency and invalid general date filters do not affect taxes");
+                Assert(page.CurrentResult.Receipts==10000m && page.CurrentResult.PreliminaryTax==2000m && page.CurrentResult.Tax==1600m && page.CurrentResult.Remaining==8000m,"unrelated search, currency and invalid general date filters do not affect taxes");
                 Assert(page.CurrentResult.Payments.Count==2,"archived received payment included once");
-                page.SetPeriod(2026,3,"USD"); Assert(page.CurrentResult.Receipts==100m && page.CurrentResult.Tax==20m,"tax page currency changes independently");
+                page.SetAllTime("BYN");
+                Assert(page.AllTime && page.CurrentResult.Receipts==10150m && page.CurrentResult.PreliminaryTax==2030m && page.CurrentResult.Remaining==8120m && page.CurrentResult.Tax==1624m
+                    && page.CurrentResult.Payments.Count==3,"all-time mode is independent of general filters and includes prior quarters");
+                page.SetPeriod(2026,3,"USD"); Assert(page.CurrentResult.Receipts==100m && page.CurrentResult.PreliminaryTax==20m && page.CurrentResult.Tax==16m,"tax page currency changes independently");
                 form.Navigate("payment"); Application.DoEvents();
                 Assert(!page.Visible && Field<DataGridView>(form,"grid").Visible && Field<FlowLayoutPanel>(form,"filters").Visible && Field<FlowLayoutPanel>(form,"actions").Visible,"leaving restores payment view");
                 form.Navigate("taxes"); Application.DoEvents();
                 Assert(Field<QuarterlyTaxesPage>(form,"taxesPage")==page && page.SelectedYear==2026 && page.SelectedQuarter==3 && page.SelectedCurrency=="USD","tax selection and existing control survive navigation");
+                page.SetAllTime("USD"); form.Navigate("payment"); form.Navigate("taxes"); Application.DoEvents();
+                Assert(page.AllTime && page.CurrentResult.Tax==16m,"all-time mode persists across navigation");
                 var replacement=new Store(Path.Combine(folder,"replacement-data"));
                 Add(replacement,"settings","currency","RUB");
                 var replacementParty=Add(replacement,"party","name","Другой тестовый плательщик","role","both");
@@ -63,8 +68,8 @@ namespace WorkLedger
                 var previousPage=page;
                 form.ReplaceStore(replacement); Application.DoEvents(); page=Field<QuarterlyTaxesPage>(form,"taxesPage");
                 Assert(previousPage.IsDisposed && page!=previousPage && page.Visible && Field<string>(form,"current")=="taxes","store replacement disposes the old tax page and preserves the active section");
-                Assert(page.SelectedYear==2026 && page.SelectedQuarter==3 && page.SelectedCurrency=="USD","restoring data preserves the selected tax period and currency");
-                Assert(page.CurrentResult.Receipts==325m && page.CurrentResult.Tax==65m && page.CurrentResult.Remaining==260m && page.CurrentResult.Payments.Single().PaymentId==replacementPayment.Id,"tax calculation after restore uses only the replacement ledger");
+                Assert(page.AllTime && page.CurrentResult.AllTime && page.SelectedYear==2026 && page.SelectedQuarter==3 && page.SelectedCurrency=="USD","restoring data preserves the selected tax period and currency");
+                Assert(page.CurrentResult.Receipts==325m && page.CurrentResult.PreliminaryTax==65m && page.CurrentResult.Tax==52m && page.CurrentResult.Remaining==260m && page.CurrentResult.Payments.Single().PaymentId==replacementPayment.Id,"tax calculation after restore uses only the replacement ledger");
                 form.Navigate("payment"); Application.DoEvents();
                 var anotherStore=new Store(Path.Combine(folder,"another-restored-data"));
                 Add(anotherStore,"settings","currency","EUR");
@@ -74,7 +79,34 @@ namespace WorkLedger
                 previousPage=page; form.ReplaceStore(anotherStore); Application.DoEvents(); page=Field<QuarterlyTaxesPage>(form,"taxesPage");
                 Assert(previousPage.IsDisposed && Field<string>(form,"current")=="payment" && !page.Visible && Field<DataGridView>(form,"grid").Visible && Field<FlowLayoutPanel>(form,"actions").Visible && Field<FlowLayoutPanel>(form,"filters").Visible,"replacing a ledger while taxes are hidden preserves the payment view");
                 form.Navigate("taxes"); Application.DoEvents();
-                Assert(page.SelectedYear==2026 && page.SelectedQuarter==3 && page.SelectedCurrency=="USD" && page.CurrentResult.Receipts==50m && page.CurrentResult.Tax==10m && page.CurrentResult.Remaining==40m,"a cached hidden tax page also rebinds to restored data");
+                Assert(page.AllTime && page.CurrentResult.AllTime && page.SelectedYear==2026 && page.SelectedQuarter==3 && page.SelectedCurrency=="USD" && page.CurrentResult.Receipts==50m && page.CurrentResult.PreliminaryTax==10m && page.CurrentResult.Tax==8m && page.CurrentResult.Remaining==40m,"a cached hidden tax page also rebinds to restored data");
+                page.SetPeriod(2026,3,"USD");
+                Assert(!page.AllTime && page.CurrentResult.Tax==8m,"quarterly mode still works after all-time restore");
+                page.SetDateRange(new DateTime(2026,8,10),new DateTime(2026,9,1),"USD");
+                Assert(page.CustomPeriod && page.CurrentResult.Receipts==50m,"custom range uses independent date selectors");
+                form.Navigate("payment"); form.Navigate("taxes"); Application.DoEvents();
+                Assert(page.CustomPeriod && page.SelectedFromDate==new DateTime(2026,8,10) && page.SelectedToDate==new DateTime(2026,9,1),"custom mode and dates persist across navigation");
+                var customStore=new Store(Path.Combine(folder,"custom-restored-data"));
+                var customParty=Add(customStore,"party","name","Период вручную","role","both");
+                Add(customStore,"payment","date","2026-08-10","partyId",customParty.Id,"direction","income","amount","90","currency","USD","method","cash");
+                Add(customStore,"payment","date","2026-09-01","partyId",customParty.Id,"direction","income","amount","110","currency","USD","method","bank");
+                Add(customStore,"payment","date","2026-09-02","partyId",customParty.Id,"direction","income","amount","500","currency","USD","method","bank");
+                byte[] customBytes=File.ReadAllBytes(customStore.DataPath);long customRevision=customStore.Revision;int customAudits=customStore.Audit.Count;
+                previousPage=page;form.ReplaceStore(customStore);Application.DoEvents();page=Field<QuarterlyTaxesPage>(form,"taxesPage");
+                Assert(previousPage.IsDisposed && page.Visible && page.CustomPeriod && page.CurrentResult.CustomPeriod && page.SelectedYear==2026 && page.SelectedQuarter==3
+                    && page.SelectedCurrency=="USD" && page.SelectedFromDate==new DateTime(2026,8,10) && page.SelectedToDate==new DateTime(2026,9,1),"visible custom range preserves all selectors after restore");
+                Assert(page.CurrentResult.Receipts==200m && page.CurrentResult.PreliminaryTax==40m && page.CurrentResult.Remaining==160m && page.CurrentResult.Tax==32m
+                    && page.CurrentResult.Payments.Count==2,"restored custom range excludes payments outside endpoints");
+                form.Navigate("payment");form.ReplaceStore(anotherStore);Application.DoEvents();page=Field<QuarterlyTaxesPage>(form,"taxesPage");
+                Assert(!page.Visible && page.CustomPeriod,"hidden custom range is preserved during restore");
+                form.Navigate("taxes");Application.DoEvents();
+                Assert(page.CustomPeriod && page.SelectedFromDate==new DateTime(2026,8,10) && page.SelectedToDate==new DateTime(2026,9,1) && page.CurrentResult.Receipts==50m,
+                    "hidden custom range reads replacement ledger on return");
+                page.SetAllTime("USD");form.ReplaceStore(customStore);Application.DoEvents();page=Field<QuarterlyTaxesPage>(form,"taxesPage");
+                Assert(page.AllTime && page.CurrentResult.Receipts==700m,"all-time ignores preserved custom range during restore");
+                page.Controls.Find("taxMode",true).OfType<ComboBox>().Single().SelectedIndex=2;
+                Assert(page.CustomPeriod && page.CurrentResult.Receipts==200m && page.SelectedFromDate==new DateTime(2026,8,10),"restoring another mode preserves remembered custom dates");
+                Assert(customStore.Revision==customRevision && customStore.Audit.Count==customAudits && customBytes.SequenceEqual(File.ReadAllBytes(customStore.DataPath)),"custom restore and recalculate preserve ledger and audit");
                 var onlyTaxes=new UiPreferences { AnimationsEnabled=false };
                 foreach(var section in UiPreferences.Sections) onlyTaxes.SetVisible(section.Key,section.Key=="taxes");
                 form.ApplyInterfacePreferences(onlyTaxes); Application.DoEvents();

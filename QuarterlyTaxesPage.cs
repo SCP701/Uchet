@@ -13,14 +13,22 @@ namespace WorkLedger
         private static readonly string[] Currencies = { "BYN", "RUB", "USD", "EUR" };
         private readonly Store store;
         private readonly NumericUpDown year;
-        private readonly ComboBox quarter, currency;
-        private readonly Label period, receiptsValue, taxValue, remainingValue, paymentCount, emptyState;
+        private readonly DateTimePicker fromDate, toDate;
+        private readonly Label yearCaption, quarterCaption;
+        private readonly ComboBox mode, quarter, currency;
+        private readonly TableLayoutPanel layout, cards;
+        private readonly List<Control> summaryCards = new List<Control>();
+        private readonly Label period, receiptsValue, preliminaryValue, taxValue, remainingValue, paymentCount, emptyState;
         private readonly DataGridView payments;
         private readonly List<Font> ownedFonts = new List<Font>();
         private readonly Font[] valueFonts;
-        private bool changingPeriod, fittingAmount;
+        private bool changingPeriod, fittingAmount, arrangingCards;
         public event Action<string> PaymentRequested;
         public QuarterlyTaxResult CurrentResult { get; private set; }
+        public bool AllTime { get { return mode.SelectedIndex == 1; } }
+        public bool CustomPeriod { get { return mode.SelectedIndex == 2; } }
+        public DateTime SelectedFromDate { get { return fromDate.Value.Date; } }
+        public DateTime SelectedToDate { get { return toDate.Value.Date; } }
         public int SelectedYear { get { return Decimal.ToInt32(year.Value); } }
         public int SelectedQuarter { get { return quarter.SelectedIndex + 1; } }
         public string SelectedCurrency { get { return Convert.ToString(currency.SelectedItem); } }
@@ -33,61 +41,75 @@ namespace WorkLedger
             Font = OwnFont(9.5F, FontStyle.Regular); DoubleBuffered = true;
             valueFonts = new[] { OwnFont(22, FontStyle.Bold), OwnFont(20, FontStyle.Bold),
                 OwnFont(18, FontStyle.Bold), OwnFont(16, FontStyle.Bold), OwnFont(14, FontStyle.Bold), OwnFont(12, FontStyle.Bold) };
-            var layout = new TableLayoutPanel { Name = "taxLayout", Dock = DockStyle.Fill, ColumnCount = 1,
+            layout = new TableLayoutPanel { Name = "taxLayout", Dock = DockStyle.Fill, ColumnCount = 1,
                 RowCount = 4, BackColor = UiStyle.Background, Padding = new Padding(0), Margin = new Padding(0) };
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 86));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 132));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 57));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 70));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 192));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             Controls.Add(layout);
 
-            var selectors = new UiPanel { Name = "taxSelectors", Dock = DockStyle.Fill, Padding = new Padding(14, 8, 14, 8), Margin = new Padding(0, 0, 0, 10) };
-            var selectorLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, RowCount = 2, Margin = new Padding(0) };
-            selectorLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 124));
-            selectorLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 185));
-            selectorLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 122));
+            var selectors = new UiPanel { Name = "taxSelectors", Dock = DockStyle.Fill, Padding = new Padding(14, 8, 14, 8), Margin = new Padding(0, 0, 0, 4) };
+            var selectorLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 5, RowCount = 2, Margin = new Padding(0) };
+            selectorLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 190));
+            selectorLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));
+            selectorLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 154));
+            selectorLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));
             selectorLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             selectorLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));
             selectorLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             selectors.Controls.Add(selectorLayout); layout.Controls.Add(selectors, 0, 0);
-            selectorLayout.Controls.Add(SmallLabel("Год"), 0, 0);
-            selectorLayout.Controls.Add(SmallLabel("Квартал"), 1, 0);
-            selectorLayout.Controls.Add(SmallLabel("Валюта"), 2, 0);
-            selectorLayout.Controls.Add(SmallLabel("Период расчёта"), 3, 0);
-            year = new NumericUpDown { Name = "taxYear", Minimum = 1, Maximum = 9999, Width = 108,
+            selectorLayout.Controls.Add(SmallLabel("Расчёт"), 0, 0);
+            yearCaption = SmallLabel("Год"); quarterCaption = SmallLabel("Квартал");
+            selectorLayout.Controls.Add(yearCaption, 1, 0); selectorLayout.Controls.Add(quarterCaption, 2, 0);
+            selectorLayout.Controls.Add(SmallLabel("Валюта"), 3, 0);
+            selectorLayout.Controls.Add(SmallLabel("Период расчёта"), 4, 0);
+            mode = new ComboBox { Name = "taxMode", DropDownStyle = ComboBoxStyle.DropDownList, FlatStyle = FlatStyle.Flat,
+                Width = 176, Font = Font, Margin = new Padding(0), AccessibleName = "Режим расчёта налога" };
+            mode.Items.AddRange(new object[] { "По кварталам", "За всё время", "За выбранный период" });
+            year = new NumericUpDown { Name = "taxYear", Minimum = 1, Maximum = 9999, Width = 84,
                 Font = Font, BorderStyle = BorderStyle.FixedSingle, Margin = new Padding(0), AccessibleName = "Год расчёта налога" };
             quarter = new ComboBox { Name = "taxQuarter", DropDownStyle = ComboBoxStyle.DropDownList, FlatStyle = FlatStyle.Flat,
-                Width = 169, Font = Font, Margin = new Padding(0), AccessibleName = "Квартал расчёта налога" };
+                Width = 140, Font = Font, Margin = new Padding(0), AccessibleName = "Квартал расчёта налога" };
             quarter.Items.AddRange(new object[] { "I квартал", "II квартал", "III квартал", "IV квартал" });
             currency = new ComboBox { Name = "taxCurrency", DropDownStyle = ComboBoxStyle.DropDownList, FlatStyle = FlatStyle.Flat,
-                Width = 100, Font = Font, Margin = new Padding(0), AccessibleName = "Валюта расчёта налога" };
+                Width = 84, Font = Font, Margin = new Padding(0), AccessibleName = "Валюта расчёта налога" };
             currency.Items.AddRange(Currencies);
             period = new Label { Name = "taxPeriod", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft,
                 Font = OwnFont(10, FontStyle.Bold), Margin = new Padding(0), AutoEllipsis = false };
-            selectorLayout.Controls.Add(year, 0, 1); selectorLayout.Controls.Add(quarter, 1, 1);
-            selectorLayout.Controls.Add(currency, 2, 1); selectorLayout.Controls.Add(period, 3, 1);
+            fromDate = new DateTimePicker { Name = "taxFrom", Format = DateTimePickerFormat.Custom, CustomFormat = "dd.MM.yyyy",
+                Width = 96, Font = Font, Margin = new Padding(0), AccessibleName = "Начало периода налога включительно", Visible = false };
+            toDate = new DateTimePicker { Name = "taxTo", Format = DateTimePickerFormat.Custom, CustomFormat = "dd.MM.yyyy",
+                Width = 140, Font = Font, Margin = new Padding(0), AccessibleName = "Конец периода налога включительно", Visible = false };
+            var yearSlot = new Panel { Dock = DockStyle.Fill, Margin = new Padding(0) };
+            var quarterSlot = new Panel { Dock = DockStyle.Fill, Margin = new Padding(0) };
+            yearSlot.Controls.Add(year); yearSlot.Controls.Add(fromDate);
+            quarterSlot.Controls.Add(quarter); quarterSlot.Controls.Add(toDate);
+            selectorLayout.Controls.Add(mode, 0, 1); selectorLayout.Controls.Add(yearSlot, 1, 1); selectorLayout.Controls.Add(quarterSlot, 2, 1);
+            selectorLayout.Controls.Add(currency, 3, 1); selectorLayout.Controls.Add(period, 4, 1);
 
-            var cards = new TableLayoutPanel { Name = "taxSummaryCards", Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1,
+            cards = new TableLayoutPanel { Name = "taxSummaryCards", Dock = DockStyle.Fill,
                 Margin = new Padding(0), BackColor = UiStyle.Background };
-            for (int i = 0; i < 3; i++) cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F / 3F));
-            cards.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            cards.Controls.Add(SummaryCard("Белые поступления", "По датам оплат за квартал", UiStyle.Accent, "taxReceipts", out receiptsValue, true), 0, 0);
-            cards.Controls.Add(SummaryCard("Налог 20%", "Поступления × 20%", UiStyle.Blue, "taxAmount", out taxValue, true), 1, 0);
-            cards.Controls.Add(SummaryCard("Остаток белых оплат", "Белые поступления − налог", UiStyle.Accent, "taxRemaining", out remainingValue, false), 2, 0);
+            summaryCards.Add(SummaryCard("Поступления (n)", "Белые оплаты", UiStyle.Accent, "taxReceipts", out receiptsValue));
+            summaryCards.Add(SummaryCard("Предварительный налог (p)", "n × 20%", UiStyle.Accent, "taxPreliminary", out preliminaryValue));
+            summaryCards.Add(SummaryCard("Сумма после вычета (g)", "n − p", UiStyle.Accent, "taxRemaining", out remainingValue));
+            summaryCards.Add(SummaryCard("Окончательный налог", "g × 20%", UiStyle.Blue, "taxAmount", out taxValue));
             layout.Controls.Add(cards, 0, 1);
+            SizeChanged += delegate { ArrangeSummaryCards(); };
+            ArrangeSummaryCards();
 
-            var explanation = new Label { Name = "taxExplanation", Dock = DockStyle.Fill, Margin = new Padding(1, 3, 0, 8),
+            var explanation = new Label { Name = "taxExplanation", Dock = DockStyle.Fill, Margin = new Padding(1, 2, 0, 4),
                 ForeColor = UiStyle.Muted, TextAlign = ContentAlignment.MiddleLeft, Font = Font,
-                Text = "Налог = поступления × 20%. Остаток = поступления − налог.\r\nВ расчёте — белые оплаты и авансы, включая архив. Серые оплаты исключены." };
+                Text = "p = n × 20%; g = n − p; окончательный налог = g × 20%.\r\nБелые оплаты и авансы, включая архив. Серые и исходящие оплаты исключены." };
             layout.Controls.Add(explanation, 0, 2);
 
-            var detail = new UiPanel { Name = "taxPaymentsPanel", Dock = DockStyle.Fill, Padding = new Padding(12), Margin = new Padding(0) };
+            var detail = new UiPanel { Name = "taxPaymentsPanel", Dock = DockStyle.Fill, Padding = new Padding(8), Margin = new Padding(0) };
             var detailLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Margin = new Padding(0) };
             detailLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 33));
+            detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
             detailLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 27));
+            detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));
             detail.Controls.Add(detailLayout); layout.Controls.Add(detail, 0, 3);
             detailLayout.Controls.Add(new Label { Name = "taxPaymentsTitle", Text = "Оплаты, вошедшие в расчёт", Dock = DockStyle.Fill,
                 Font = OwnFont(12, FontStyle.Bold), TextAlign = ContentAlignment.MiddleLeft, Margin = new Padding(0) }, 0, 0);
@@ -97,7 +119,7 @@ namespace WorkLedger
                 AllowUserToAddRows = false, AllowUserToDeleteRows = false, AllowUserToResizeRows = false,
                 RowHeadersVisible = false, SelectionMode = DataGridViewSelectionMode.FullRowSelect, MultiSelect = false,
                 AutoGenerateColumns = false, AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
-                ClipboardCopyMode = DataGridViewClipboardCopyMode.EnableAlwaysIncludeHeaderText, AccessibleName = "Входящие оплаты за выбранный квартал" };
+                ClipboardCopyMode = DataGridViewClipboardCopyMode.EnableAlwaysIncludeHeaderText, AccessibleName = "Входящие оплаты за выбранный период" };
             UiStyle.ApplyGrid(payments);
             payments.DefaultCellStyle.FormatProvider = Russian;
             AddColumn("date", "Дата", 13, 99, typeof(DateTime)); payments.Columns["date"].DefaultCellStyle.Format = "dd.MM.yyyy";
@@ -111,13 +133,14 @@ namespace WorkLedger
             gridHost.Controls.Add(payments);
             emptyState = new Label { Name = "taxEmptyState", Dock = DockStyle.Fill, ForeColor = UiStyle.Muted,
                 Font = OwnFont(11, FontStyle.Regular), TextAlign = ContentAlignment.MiddleCenter, Padding = new Padding(12),
-                Text = "За этот квартал белых поступлений нет.\r\nВыберите другой период или добавьте входящую оплату." };
+                Text = "За выбранный период белых поступлений нет.\r\nВыберите другой период или добавьте входящую оплату." };
             gridHost.Controls.Add(emptyState); emptyState.BringToFront();
             paymentCount = new Label { Name = "taxPaymentCount", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft,
                 ForeColor = UiStyle.Muted, Font = Font, Margin = new Padding(0, 5, 0, 0) };
             detailLayout.Controls.Add(paymentCount, 0, 2);
 
-            year.ValueChanged += PeriodChanged; quarter.SelectedIndexChanged += PeriodChanged; currency.SelectedIndexChanged += PeriodChanged;
+            fromDate.ValueChanged += DateRangeChanged; toDate.ValueChanged += DateRangeChanged;
+            mode.SelectedIndexChanged += PeriodChanged; year.ValueChanged += PeriodChanged; quarter.SelectedIndexChanged += PeriodChanged; currency.SelectedIndexChanged += PeriodChanged;
             payments.CellDoubleClick += delegate(object sender, DataGridViewCellEventArgs e) { if (e.RowIndex >= 0) RequestPayment(payments.Rows[e.RowIndex]); };
             payments.KeyDown += delegate(object sender, KeyEventArgs e)
             {
@@ -128,6 +151,10 @@ namespace WorkLedger
             string defaultCurrency = settings == null ? "BYN" : settings.Get("currency");
             if (!Currencies.Contains(defaultCurrency)) defaultCurrency = "BYN";
             Tuple<int, int> previous = QuarterlyTaxes.PreviousQuarter(DateTime.Today);
+            int firstMonth = (previous.Item2 - 1) * 3 + 1, lastMonth = firstMonth + 2;
+            changingPeriod = true;
+            try { fromDate.Value = new DateTime(previous.Item1, firstMonth, 1); toDate.Value = new DateTime(previous.Item1, lastMonth, DateTime.DaysInMonth(previous.Item1, lastMonth)); }
+            finally { changingPeriod = false; }
             SetPeriod(previous.Item1, previous.Item2, defaultCurrency);
         }
 
@@ -137,7 +164,29 @@ namespace WorkLedger
             if (selectedQuarter < 1 || selectedQuarter > 4) throw new ArgumentOutOfRangeException("selectedQuarter");
             if (!Currencies.Contains(selectedCurrency)) throw new ArgumentException("Выберите валюту BYN, RUB, USD или EUR.", "selectedCurrency");
             changingPeriod = true;
-            try { year.Value = selectedYear; quarter.SelectedIndex = selectedQuarter - 1; currency.SelectedItem = selectedCurrency; }
+            try { mode.SelectedIndex = 0; year.Value = selectedYear; quarter.SelectedIndex = selectedQuarter - 1; currency.SelectedItem = selectedCurrency; }
+            finally { changingPeriod = false; }
+            RefreshData();
+        }
+
+        public void SetAllTime(string selectedCurrency)
+        {
+            if (!Currencies.Contains(selectedCurrency)) throw new ArgumentException("Выберите валюту BYN, RUB, USD или EUR.", "selectedCurrency");
+            changingPeriod = true;
+            try { mode.SelectedIndex = 1; currency.SelectedItem = selectedCurrency; }
+            finally { changingPeriod = false; }
+            RefreshData();
+        }
+
+        public void SetDateRange(DateTime selectedFrom, DateTime selectedTo, string selectedCurrency)
+        {
+            selectedFrom = selectedFrom.Date; selectedTo = selectedTo.Date;
+            if (selectedFrom > selectedTo) throw new ArgumentException("Дата начала периода должна быть не позже даты окончания.", "selectedFrom");
+            if (selectedFrom < fromDate.MinDate || selectedFrom > fromDate.MaxDate) throw new ArgumentOutOfRangeException("selectedFrom");
+            if (selectedTo < toDate.MinDate || selectedTo > toDate.MaxDate) throw new ArgumentOutOfRangeException("selectedTo");
+            if (!Currencies.Contains(selectedCurrency)) throw new ArgumentException("Выберите валюту BYN, RUB, USD или EUR.", "selectedCurrency");
+            changingPeriod = true;
+            try { fromDate.Value = selectedFrom; toDate.Value = selectedTo; currency.SelectedItem = selectedCurrency; mode.SelectedIndex = 2; }
             finally { changingPeriod = false; }
             RefreshData();
         }
@@ -145,10 +194,19 @@ namespace WorkLedger
         public void RefreshData()
         {
             if (changingPeriod || SelectedQuarter < 1 || currency.SelectedIndex < 0) return;
-            QuarterlyTaxResult result = QuarterlyTaxes.Calculate(store, SelectedYear, SelectedQuarter, SelectedCurrency);
+            year.Visible = quarter.Visible = !CustomPeriod;
+            fromDate.Visible = toDate.Visible = CustomPeriod;
+            year.Enabled = quarter.Enabled = !AllTime && !CustomPeriod;
+            yearCaption.Text = CustomPeriod ? "С" : "Год"; quarterCaption.Text = CustomPeriod ? "По" : "Квартал";
+            QuarterlyTaxResult result = AllTime ? QuarterlyTaxes.CalculateAllTime(store, SelectedCurrency)
+                : CustomPeriod ? QuarterlyTaxes.CalculateRange(store, SelectedFromDate, SelectedToDate, SelectedCurrency)
+                : QuarterlyTaxes.Calculate(store, SelectedYear, SelectedQuarter, SelectedCurrency);
             CurrentResult = result;
-            period.Text = result.FromDate.ToString("d MMMM", Russian) + " — " + result.ToDate.ToString("d MMMM yyyy", Russian) + " г.";
-            SetAmount(receiptsValue, result.Receipts, result.Currency); SetAmount(taxValue, result.Tax, result.Currency);
+            period.Text = AllTime ? "Все даты поступлений" : CustomPeriod
+                ? result.FromDate.ToString("dd.MM.yyyy", Russian) + " — " + result.ToDate.ToString("dd.MM.yyyy", Russian)
+                : result.FromDate.ToString("d MMMM", Russian) + " — " + result.ToDate.ToString("d MMMM yyyy", Russian) + " г.";
+            SetAmount(receiptsValue, result.Receipts, result.Currency); SetAmount(preliminaryValue, result.PreliminaryTax, result.Currency);
+            SetAmount(taxValue, result.Tax, result.Currency);
             SetAmount(remainingValue, result.Remaining, result.Currency);
             payments.SuspendLayout();
             try
@@ -181,6 +239,42 @@ namespace WorkLedger
                 + (archived == 0 ? "" : "    ·    В архиве: " + archived.ToString(Russian));
         }
 
+        private void ArrangeSummaryCards()
+        {
+            if (arrangingCards || cards == null || summaryCards.Count != 4) return;
+            int columns = ClientSize.Width >= 1000 ? 4 : 2;
+            if (cards.ColumnCount == columns) return;
+            arrangingCards = true; layout.SuspendLayout(); cards.SuspendLayout();
+            try
+            {
+                cards.Controls.Clear(); cards.ColumnStyles.Clear(); cards.RowStyles.Clear();
+                cards.ColumnCount = columns; cards.RowCount = 4 / columns;
+                for (int i = 0; i < columns; i++) cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F / columns));
+                for (int i = 0; i < cards.RowCount; i++) cards.RowStyles.Add(new RowStyle(SizeType.Percent, 100F / cards.RowCount));
+                for (int i = 0; i < summaryCards.Count; i++)
+                {
+                    summaryCards[i].Margin = new Padding(0, 0, i % columns == columns - 1 ? 0 : 8, i / columns == cards.RowCount - 1 ? 0 : 6);
+                    cards.Controls.Add(summaryCards[i], i % columns, i / columns);
+                }
+                layout.RowStyles[1].Height = columns == 4 ? 112 : 192;
+            }
+            finally { cards.ResumeLayout(true); layout.ResumeLayout(true); arrangingCards = false; }
+        }
+        private void DateRangeChanged(object sender, EventArgs args)
+        {
+            if (changingPeriod) return;
+            changingPeriod = true;
+            try
+            {
+                if (SelectedFromDate > SelectedToDate)
+                {
+                    if (Object.ReferenceEquals(sender, fromDate)) toDate.Value = fromDate.Value;
+                    else fromDate.Value = toDate.Value;
+                }
+            }
+            finally { changingPeriod = false; }
+            if (CustomPeriod) RefreshData();
+        }
         private void PeriodChanged(object sender, EventArgs args) { RefreshData(); }
         private void RequestPayment(DataGridViewRow row)
         {
@@ -197,14 +291,14 @@ namespace WorkLedger
         {
             return new Label { Text = text, Dock = DockStyle.Fill, ForeColor = UiStyle.Muted, Font = Font, Margin = new Padding(0) };
         }
-        private Control SummaryCard(string caption, string description, Color color, string valueName, out Label value, bool gap)
+        private Control SummaryCard(string caption, string description, Color color, string valueName, out Label value)
         {
-            var card = new UiPanel { Dock = DockStyle.Fill, Padding = new Padding(16, 12, 16, 12), Margin = new Padding(0, 0, gap ? 10 : 0, 0) };
+            var card = new UiPanel { Dock = DockStyle.Fill, Padding = new Padding(12, 6, 12, 6), Margin = new Padding(0) };
             var content = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Margin = new Padding(0) };
             content.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            content.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
+            content.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));
             content.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            content.RowStyles.Add(new RowStyle(SizeType.Absolute, 23));
+            content.RowStyles.Add(new RowStyle(SizeType.Absolute, 18));
             content.Controls.Add(new Label { Text = caption, Dock = DockStyle.Fill, Font = OwnFont(10, FontStyle.Regular),
                 ForeColor = UiStyle.Muted, Margin = new Padding(0), TextAlign = ContentAlignment.TopLeft }, 0, 0);
             value = new Label { Name = valueName, Dock = DockStyle.Fill, Margin = new Padding(0), Font = valueFonts[0],
@@ -233,7 +327,8 @@ namespace WorkLedger
             Font selected = valueFonts[valueFonts.Length - 1];
             foreach (Font candidate in valueFonts)
             {
-                if (TextRenderer.MeasureText(label.Text, candidate, new Size(Int32.MaxValue, Int32.MaxValue), TextFormatFlags.SingleLine | TextFormatFlags.NoPadding).Width <= width)
+                Size measured = TextRenderer.MeasureText(label.Text, candidate, new Size(Int32.MaxValue, Int32.MaxValue), TextFormatFlags.SingleLine | TextFormatFlags.NoPadding);
+                if (measured.Width <= width && measured.Height <= label.ClientSize.Height)
                 { selected = candidate; break; }
             }
             if (Object.ReferenceEquals(label.Font, selected)) return;

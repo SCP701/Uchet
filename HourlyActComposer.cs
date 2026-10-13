@@ -17,10 +17,13 @@ namespace WorkLedger
         private readonly Store store;
         private readonly bool externalActs;
         private Record source;
-        private readonly ComboBox counterparty = new ComboBox(), contract = new ComboBox(), status = new ComboBox();
+        private readonly ComboBox counterparty = new ReferencePickerCombo(), contract = new ReferencePickerCombo(), status = new ComboBox();
         private readonly DateTimePicker date = new DateTimePicker(), due = new DateTimePicker();
         private readonly Label number = new Label(), rate = new Label(), requisites = new Label(), totals = new Label();
         private readonly DataGridView works = new DataGridView();
+        private readonly HashSet<DataGridViewRow> customRateRows = new HashSet<DataGridViewRow>();
+        private TextBox activeEditor;
+        private DataGridViewCell activeCell;
         private decimal defaultRate;
         private string documentCurrency, documentDirection;
         private bool loading;
@@ -35,6 +38,10 @@ namespace WorkLedger
             this.store = store; source = existing == null ? null : existing.Clone();
             this.externalActs = source == null ? externalActs : Store.IsExternalAct(source);
             Dock = DockStyle.Fill; BackColor = Color.White; Font = new Font("Segoe UI", 10F); Padding = new Padding(16);
+            ((ReferencePickerCombo)counterparty).Configure(store, "party", "Контрагент",
+                delegate(object item) { Option option = item as Option; return option == null ? "" : option.Id; }, false);
+            ((ReferencePickerCombo)contract).Configure(store, "contract", "Договор",
+                delegate(object item) { Option option = item as Option; return option == null ? "" : option.Id; }, true);
             var settings = store.Of("settings").FirstOrDefault();
             documentCurrency = source == null ? (settings == null || settings.Get("currency") == "" ? "BYN" : settings.Get("currency")) : source.Get("currency");
             documentDirection = source == null ? "income" : source.Get("direction");
@@ -47,9 +54,11 @@ namespace WorkLedger
             foreach (Record party in store.Of("party").OrderBy(r => r.Get("name"))) counterparty.Items.Add(new Option(party.Id, party.Get("name")));
             if (source != null && !counterparty.Items.Cast<Option>().Any(p => p.Id == source.Get("partyId")))
             { var cp = store.Find(source.Get("partyId")); if (cp != null) counterparty.Items.Add(new Option(cp.Id, cp.Get("name") + " (архив)")); }
-            date.Format = DateTimePickerFormat.Custom; date.CustomFormat = "dd.MM.yyyy"; date.Dock = DockStyle.Fill;
+            date.Format = DateTimePickerFormat.Custom; date.CustomFormat = "dd.MM.yyyy"; date.Dock = DockStyle.Fill; date.Margin = new Padding(3, 8, 3, 3);
             DateTime value; if (source != null && DateTime.TryParse(source.Get("date"), out value)) date.Value = value;
-            heading.Controls.Add(FieldLabel("Контрагент"), 0, 0); heading.Controls.Add(counterparty, 1, 0);
+            heading.Controls.Add(FieldLabel("Контрагент"), 0, 0);
+            heading.Controls.Add(new ReferenceSelectionField((ReferencePickerCombo)counterparty, "Контрагент",
+                "Выберите контрагента", "composer-counterparty", "party") { Dock = DockStyle.Fill }, 1, 0);
             heading.Controls.Add(FieldLabel("Дата"), 2, 0); heading.Controls.Add(date, 3, 0);
             number.AutoSize = rate.AutoSize = true; number.Margin = rate.Margin = new Padding(0, 10, 0, 6);
             number.Font = new Font(Font, FontStyle.Bold); rate.ForeColor = Color.FromArgb(0, 119, 116);
@@ -66,10 +75,17 @@ namespace WorkLedger
             Select(status, source == null ? "draft" : source.Get("status"));
             due.Format = DateTimePickerFormat.Custom; due.CustomFormat = "dd.MM.yyyy"; due.ShowCheckBox = true; due.Checked = false;
             if (source != null && DateTime.TryParse(source.Get("dueDate"), out value)) { due.Value = value; due.Checked = true; }
-            options.Controls.Add(FieldLabel("Договор"), 0, 0); options.Controls.Add(contract, 1, 0); options.Controls.Add(FieldLabel("Статус"), 2, 0);
-            options.Controls.Add(status, 3, 0); options.Controls.Add(FieldLabel("Срок оплаты"), 4, 0); options.Controls.Add(due, 5, 0);
+            options.Controls.Add(FieldLabel("Договор"), 0, 0);
+            var contractField = new ReferenceSelectionField((ReferencePickerCombo)contract, "Договор",
+                "Без договора", "composer-contract", "contract") { Dock = DockStyle.Fill };
+            options.Controls.Add(contractField, 1, 0); options.SetColumnSpan(contractField, 5);
+            options.Controls.Add(FieldLabel("Статус"), 0, 1);
+            status.Dock = DockStyle.None; status.Width = 138; status.Anchor = AnchorStyles.Left;
+            options.Controls.Add(status, 1, 1); options.SetColumnSpan(status, 3);
+            options.Controls.Add(FieldLabel("Срок оплаты"), 4, 1); options.Controls.Add(due, 5, 1);
+            due.Anchor = AnchorStyles.Left | AnchorStyles.Right;
             var note = new Label { Text = "Договор и срок оплаты необязательны. Новый акт сохраняется как черновик.", AutoSize = true, ForeColor = requisites.ForeColor, Margin = new Padding(0, 8, 0, 0) };
-            options.Controls.Add(note, 0, 1); options.SetColumnSpan(note, 6);
+            options.Controls.Add(note, 0, 2); options.SetColumnSpan(note, 6);
             works.Dock = DockStyle.Fill; works.BackgroundColor = Color.White; works.BorderStyle = BorderStyle.FixedSingle;
             works.AllowUserToAddRows = true; works.AllowUserToDeleteRows = true; works.RowHeadersWidth = 34;
             works.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill; works.EnableHeadersVisualStyles = false;
@@ -78,13 +94,52 @@ namespace WorkLedger
             works.AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.AllCells; works.AccessibleName = "Работы и часы";
             works.Columns.Add(new DataGridViewTextBoxColumn { Name = "description", HeaderText = "Выполненные работы", FillWeight = 60, MinimumWidth = 240 });
             works.Columns.Add(new DataGridViewTextBoxColumn { Name = "hours", HeaderText = "Часы", FillWeight = 12, MinimumWidth = 90 });
-            works.Columns.Add(new DataGridViewTextBoxColumn { Name = "rate", HeaderText = "За час", FillWeight = 13, MinimumWidth = 95, ReadOnly = true });
+            works.Columns.Add(new DataGridViewTextBoxColumn { Name = "rate", HeaderText = "За час", FillWeight = 13, MinimumWidth = 95, ToolTipText = "Стоимость часа можно указать отдельно для каждой работы." });
             works.Columns.Add(new DataGridViewTextBoxColumn { Name = "amount", HeaderText = "Сумма", FillWeight = 15, MinimumWidth = 110, ReadOnly = true });
             foreach (string key in new[] { "hours", "rate", "amount" }) works.Columns[key].DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleRight;
             works.Columns["rate"].DefaultCellStyle.Format = works.Columns["amount"].DefaultCellStyle.Format = "N2";
-            works.Columns["rate"].DefaultCellStyle.BackColor = works.Columns["amount"].DefaultCellStyle.BackColor = Color.FromArgb(244, 247, 250);
-            works.CellValueChanged += delegate { if (!loading) UpdateTotals(); }; works.RowsAdded += delegate { if (!loading) UpdateTotals(); }; works.RowsRemoved += delegate { if (!loading) UpdateTotals(); };
-            works.DefaultValuesNeeded += delegate(object sender, DataGridViewRowEventArgs e) { e.Row.Cells["rate"].Value = defaultRate; };
+            works.Columns["amount"].DefaultCellStyle.BackColor = Color.FromArgb(244, 247, 250);
+            works.CellValueChanged += delegate(object sender, DataGridViewCellEventArgs e)
+            {
+                if (loading) return;
+                if (e.RowIndex >= 0 && e.ColumnIndex == works.Columns["rate"].Index)
+                    customRateRows.Add(works.Rows[e.RowIndex]);
+                UpdateTotals();
+            };
+            works.RowsAdded += delegate(object sender, DataGridViewRowsAddedEventArgs e)
+            {
+                if (loading) return;
+                loading = true;
+                try
+                {
+                    for (int i = e.RowIndex; i < e.RowIndex + e.RowCount; i++)
+                    {
+                        DataGridViewRow row = works.Rows[i];
+                        if (!row.IsNewRow && row.Cells["rate"].Value == null && defaultRate > 0)
+                            row.Cells["rate"].Value = defaultRate;
+                    }
+                }
+                finally { loading = false; }
+                UpdateTotals();
+            };
+            works.RowsRemoved += delegate
+            {
+                customRateRows.RemoveWhere(row => row.DataGridView != works);
+                if (!loading) UpdateTotals();
+            };
+            works.DefaultValuesNeeded += delegate(object sender, DataGridViewRowEventArgs e)
+            {
+                bool wasLoading = loading; loading = true;
+                try { if (defaultRate > 0) e.Row.Cells["rate"].Value = defaultRate; }
+                finally { loading = wasLoading; }
+            };
+            works.EditingControlShowing += delegate(object sender, DataGridViewEditingControlShowingEventArgs e)
+            {
+                DetachEditor();
+                activeEditor = e.Control as TextBox; activeCell = works.CurrentCell;
+                if (activeEditor != null) activeEditor.TextChanged += ActiveTextChanged;
+            };
+            works.CellEndEdit += delegate { DetachEditor(); if (!loading) UpdateTotals(); };
             works.DataError += delegate(object sender, DataGridViewDataErrorEventArgs e) { e.ThrowException = false; e.Cancel = true; };
             totals.Dock = DockStyle.Bottom; totals.Height = 46; totals.TextAlign = ContentAlignment.MiddleLeft; totals.Font = new Font(Font, FontStyle.Bold);
             Controls.Add(works); Controls.Add(options); Controls.Add(totals); Controls.Add(heading);
@@ -98,7 +153,7 @@ namespace WorkLedger
             }
             loading = false; FillContracts(); RefreshDetails(); UpdateTotals(); UiStyle.ApplyTo(this);
         }
-        private Label FieldLabel(string text) { return new Label { Text = text, AutoSize = true, Margin = new Padding(0, 6, 8, 4) }; }
+        private Label FieldLabel(string text) { return new Label { Text = text, AutoSize = true, Margin = new Padding(0, 12, 8, 4) }; }
         private static string SelectedId(ComboBox input) { Option option = input.SelectedItem as Option; return option == null ? "" : option.Id; }
         private static void Select(ComboBox input, string id)
         { for (int i = 0; i < input.Items.Count; i++) if (((Option)input.Items[i]).Id == id) { input.SelectedIndex = i; return; } }
@@ -127,22 +182,30 @@ namespace WorkLedger
         public void RefreshDefaults()
         {
             if (source != null) return;
+            // Commit active text before refreshing inherited prices, including invalid/blank custom input.
+            works.EndEdit();
             defaultRate = store.DefaultHourlyRate; loading = true;
-            foreach (DataGridViewRow row in works.Rows) if (!row.IsNewRow) row.Cells["rate"].Value = defaultRate;
-            loading = false; var settings = store.Of("settings").FirstOrDefault(); documentCurrency = settings == null || settings.Get("currency") == "" ? "BYN" : settings.Get("currency"); FillContracts();
+            try
+            {
+                foreach (DataGridViewRow row in works.Rows)
+                    if (!row.IsNewRow && !customRateRows.Contains(row))
+                        row.Cells["rate"].Value = defaultRate > 0 ? (object)defaultRate : null;
+            }
+            finally { loading = false; }
+            var settings = store.Of("settings").FirstOrDefault(); documentCurrency = settings == null || settings.Get("currency") == "" ? "BYN" : settings.Get("currency"); FillContracts();
         }
         private void RefreshDetails()
         {
             string actTitle = externalActs ? "Акт вне № " : "Акт № ";
             number.Text = source == null ? actTitle + store.NextActNumber + " · номер при сохранении" : actTitle + source.Get("number");
-            rate.Text = defaultRate > 0 ? defaultRate.ToString("N2") + " " + documentCurrency + " / час" : "Стоимость часа не настроена";
+            rate.Text = defaultRate > 0 ? defaultRate.ToString("N2") + " " + documentCurrency + " / час · по умолчанию" : "За час: укажите в строке работы";
             var own = source == null ? store.Of("settings").FirstOrDefault() : Store.GetActSnapshot(source, "organizationSnapshot");
             var cp = source != null && SelectedId(counterparty) == source.Get("partyId") ? Store.GetActSnapshot(source, "partySnapshot") : store.Find(SelectedId(counterparty));
             string ownName = own == null || own.Get("name") == "" ? "Укажите свою организацию в настройках" : own.Get("name");
             requisites.Text = "Исполнитель: " + ownName + (own == null || own.Get("unp") == "" ? "" : ". УНП " + own.Get("unp"))
                 + "\r\nЗаказчик: " + (cp == null ? "выберите контрагента" : cp.Get("name") + (cp.Get("unp") == "" ? "" : ". УНП " + cp.Get("unp")))
-                + "\r\n" + (defaultRate <= 0 ? "Настройки → Создание актов → Стоимость часа. Затем впишите работы и часы."
-                    : "Впишите работы и часы. Стоимость и реквизиты подставляются автоматически.");
+                + "\r\n" + (defaultRate <= 0 ? "Введите цену в колонке «За час». Ставку по умолчанию можно задать в настройках."
+                    : "Впишите работы и часы. Цену в колонке «За час» можно изменить для каждой работы.");
             works.Enabled = cp != null;
         }
         private static bool TryHours(object value, out decimal hours)
@@ -151,8 +214,29 @@ namespace WorkLedger
             return Decimal.TryParse(text, NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out hours) && hours > 0
                 && hours <= 1000000000000m && Decimal.Round(hours, 6) == hours;
         }
-        private decimal RowRate(DataGridViewRow row)
-        { decimal value; return Decimal.TryParse(Convert.ToString(row.Cells["rate"].Value), NumberStyles.Number, CultureInfo.CurrentCulture, out value) ? value : defaultRate; }
+        private static bool TryRate(object value, out decimal price)
+        {
+            string text = Convert.ToString(value).Trim().Replace(" ", "").Replace("\u00a0", "").Replace("\u202f", "").Replace(',', '.');
+            return Decimal.TryParse(text, NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out price)
+                && price > 0 && price <= 1000000000000m && Decimal.Round(price, 2) == price;
+        }
+        private void DetachEditor()
+        {
+            if (activeEditor != null) activeEditor.TextChanged -= ActiveTextChanged;
+            activeEditor = null; activeCell = null;
+        }
+        private void ActiveTextChanged(object sender, EventArgs e)
+        {
+            if (loading || activeCell == null) return;
+            if (activeCell.OwningColumn.Name == "rate") customRateRows.Add(activeCell.OwningRow);
+            UpdateTotals();
+        }
+        private object EnteredValue(DataGridViewRow row, string column)
+        {
+            DataGridViewCell cell = row.Cells[column];
+            return cell == activeCell && activeEditor != null && works.IsCurrentCellInEditMode
+                ? (object)activeEditor.Text : cell.Value;
+        }
         private void UpdateTotals()
         {
             if (loading) return; loading = true;
@@ -162,12 +246,18 @@ namespace WorkLedger
                 foreach (DataGridViewRow row in works.Rows)
                 {
                     if (row.IsNewRow) continue;
-                    string description = Convert.ToString(row.Cells["description"].Value).Trim(), entered = Convert.ToString(row.Cells["hours"].Value).Trim();
-                    if (row.Cells["rate"].Value == null) row.Cells["rate"].Value = defaultRate;
+                    string description = Convert.ToString(EnteredValue(row, "description")).Trim(), entered = Convert.ToString(EnteredValue(row, "hours")).Trim();
                     if (description == "" && entered == "") { row.Cells["amount"].Value = null; continue; }
-                    decimal quantity, price = RowRate(row);
-                    if (description == "" || !TryHours(entered, out quantity) || price <= 0) { row.Cells["amount"].Value = null; invalid = true; continue; }
-                    try { decimal sum = Decimal.Round(quantity * price, 2, MidpointRounding.AwayFromZero); row.Cells["amount"].Value = sum; hours += quantity; amount += sum; }
+                    decimal quantity, price;
+                    if (description == "" || !TryHours(entered, out quantity) || !TryRate(EnteredValue(row, "rate"), out price))
+                    { row.Cells["amount"].Value = null; invalid = true; continue; }
+                    try
+                    {
+                        decimal sum = Decimal.Round(quantity * price, 2, MidpointRounding.AwayFromZero);
+                        if (sum <= 0 || sum > 1000000000000m) { row.Cells["amount"].Value = null; invalid = true; continue; }
+                        row.Cells["amount"].Value = sum; hours += quantity; amount += sum;
+                        if (hours > 1000000000000m || amount > 1000000000000m) invalid = true;
+                    }
                     catch (OverflowException) { row.Cells["amount"].Value = null; invalid = true; }
                 }
                 totals.Text = "Всего часов: " + hours.ToString("0.######") + "     Итого: " + amount.ToString("N2") + " " + documentCurrency
@@ -177,10 +267,9 @@ namespace WorkLedger
         }
         public Record BuildDraft()
         {
-            if (!works.EndEdit()) throw new InvalidOperationException("Завершите ввод работы и часов.");
+            if (!works.EndEdit()) throw new InvalidOperationException("Завершите ввод работы, часов и цены за час.");
             string partyId = SelectedId(counterparty);
             if (partyId == "") throw new InvalidOperationException("Выберите контрагента.");
-            if (defaultRate <= 0) throw new InvalidOperationException("Укажите стоимость часа в «Настройки» → «Создание актов».");
             Record result = source == null ? store.CreateHourlyActDraft(partyId, externalActs) : source.Clone();
             result.Set("partyId", partyId); result.Set("date", Store.DateString(date.Value.Date)); result.Set("currency", documentCurrency);
             result.Set("direction", documentDirection); result.Set("contractId", SelectedId(contract));
@@ -188,7 +277,6 @@ namespace WorkLedger
             if (linked != null) result.Set("projectId", linked.Get("projectId")); else if (source == null || source.Get("contractId") != SelectedId(contract)) result.Set("projectId", "");
             result.Set("status", SelectedId(status)); result.Set("dueDate", due.Checked ? Store.DateString(due.Value.Date) : "");
             if (result.Get("status") == "signed" && result.Get("signedDate") == "") result.Set("signedDate", Store.DateString(DateTime.Today));
-            result.Set("hourlyRate", Store.MoneyString(defaultRate));
             if (source != null && source.Get("partyId") != partyId) store.CaptureActSnapshots(result);
             var lines = new List<HourlyActLine>();
             foreach (DataGridViewRow row in works.Rows)
@@ -196,10 +284,11 @@ namespace WorkLedger
                 if (row.IsNewRow) continue;
                 string description = Convert.ToString(row.Cells["description"].Value).Trim(), text = Convert.ToString(row.Cells["hours"].Value).Trim();
                 if (description == "" && text == "") continue;
-                decimal hours;
+                decimal hours, price;
                 if (description == "") throw new InvalidOperationException("Строка " + (row.Index + 1) + ": впишите выполненную работу.");
                 if (!TryHours(text, out hours)) throw new InvalidOperationException("Строка " + (row.Index + 1) + ": часы должны быть больше нуля. Можно указать 1,5 часа.");
-                lines.Add(new HourlyActLine { Description = description, Hours = hours, Rate = RowRate(row) });
+                if (!TryRate(row.Cells["rate"].Value, out price)) throw new InvalidOperationException("Строка " + (row.Index + 1) + ": укажите цену за час больше нуля, с точностью до копеек. Можно указать 35,50.");
+                lines.Add(new HourlyActLine { Description = description, Hours = hours, Rate = price });
             }
             Store.SetHourlyActLines(result, lines); return result;
         }

@@ -1,4 +1,8 @@
 ﻿using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
+using System.Drawing.Imaging;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
@@ -6,6 +10,37 @@ using System.Windows.Forms;
 
 namespace WorkLedger
 {
+    // One UI-thread frame source; idle controls do not own or run native timers.
+    internal static class UiAnimationClock
+    {
+        private static readonly Timer frames = new Timer { Interval = 15 };
+        private static readonly Stopwatch clock = Stopwatch.StartNew();
+        private static readonly HashSet<Action<double>> clients = new HashSet<Action<double>>();
+        static UiAnimationClock() { frames.Tick += Tick; }
+        internal static double Now { get { return clock.Elapsed.TotalMilliseconds; } }
+        internal static int ActiveCount { get { return clients.Count; } }
+        internal static bool Contains(Action<double> client) { return client != null && clients.Contains(client); }
+        internal static void Add(Action<double> client)
+        {
+            if (client != null && clients.Add(client) && clients.Count == 1) frames.Start();
+        }
+        internal static void Remove(Action<double> client)
+        {
+            if (client != null) clients.Remove(client);
+            if (clients.Count == 0) frames.Stop();
+        }
+        internal static float Ease(float progress)
+        {
+            float p = Math.Max(0, Math.Min(1, progress));
+            return p * p * (3F - 2F * p);
+        }
+        private static void Tick(object sender, EventArgs args)
+        {
+            double now = Now;
+            foreach (var client in clients.ToArray()) if (clients.Contains(client)) client(now);
+        }
+    }
+
     public static class UiStyle
     {
         public static readonly Color Ink = Color.FromArgb(32, 45, 64);
@@ -21,9 +56,16 @@ namespace WorkLedger
         internal static readonly Color Selection = Color.FromArgb(227, 237, 255);
 
         // Existing business status colors and custom title sizes are deliberately preserved.
+        private static readonly PropertyInfo BufferedProperty = typeof(Control).GetProperty("DoubleBuffered", BindingFlags.Instance | BindingFlags.NonPublic);
+        private static void BufferSurface(Control control)
+        {
+            if (control is Panel || control is UserControl || control is DataGridView)
+                if (!(bool)BufferedProperty.GetValue(control, null)) BufferedProperty.SetValue(control, true, null);
+        }
         public static void ApplyTo(Control control)
         {
             if (control == null || control.IsDisposed) return;
+            BufferSurface(control);
             if (control.Font.Name != "Segoe UI" && control.Font.Size <= 10.5F)
                 control.Font = new Font("Segoe UI", Math.Max(9.5F, control.Font.Size), control.Font.Style);
             if (control.ForeColor == SystemColors.ControlText || control.ForeColor == Color.Black)
@@ -40,6 +82,7 @@ namespace WorkLedger
         }
         public static void ApplyGrid(DataGridView grid)
         {
+            BufferSurface(grid);
             grid.BackgroundColor = Surface;
             grid.BorderStyle = BorderStyle.None;
             grid.EnableHeadersVisualStyles = false;
@@ -122,8 +165,8 @@ namespace WorkLedger
 
     public class UiButton : Button
     {
-        private readonly Timer animation = new Timer();
-        private readonly Stopwatch clock = new Stopwatch();
+        private readonly Action<double> animateFrame;
+        private double startedAt, duration = 185;
         private bool primary, selected, navigation, animationsEnabled = true, hovered, pressed;
         private string iconKey;
         private Color displayed, initial, destination;
@@ -137,15 +180,16 @@ namespace WorkLedger
             set { if (animationsEnabled == value) return; animationsEnabled = value; if (!value) Snap(); }
         }
         public string IconKey { get { return iconKey; } set { iconKey = value; Invalidate(); } }
-        internal bool AnimationRunning { get { return animation.Enabled; } }
+        internal bool AnimationRunning { get { return UiAnimationClock.Contains(animateFrame); } }
         public UiButton()
         {
+            animateFrame = Animate;
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
             FlatStyle = FlatStyle.Flat; FlatAppearance.BorderSize = 0; UseVisualStyleBackColor = false;
             BackColor = UiStyle.Surface; ForeColor = UiStyle.Ink; Font = new Font("Segoe UI", 10F);
             Padding = new Padding(12, 0, 12, 0); Height = 38; MinimumSize = new Size(0, 36);
             Cursor = Cursors.Hand; AccessibleRole = AccessibleRole.PushButton;
-            displayed = UiStyle.Surface; animation.Interval = 15; animation.Tick += Animate;
+            displayed = UiStyle.Surface;
         }
         public override Size GetPreferredSize(Size proposedSize)
         {
@@ -162,22 +206,31 @@ namespace WorkLedger
         }
         private void Snap()
         {
-            animation.Stop(); clock.Stop(); displayed = TargetColor(); marker = selected && navigation ? 1 : 0; Invalidate();
+            UiAnimationClock.Remove(animateFrame); displayed = TargetColor(); marker = selected && navigation ? 1 : 0; Invalidate();
         }
         private void ChangeState()
         {
             if (IsDisposed || Disposing) return;
+            double now = UiAnimationClock.Now;
+            if (AnimationRunning) Animate(now);
             destination = TargetColor(); markerDestination = selected && navigation ? 1 : 0;
             if (!animationsEnabled || !Visible || !IsHandleCreated || Parent == null) { Snap(); return; }
-            initial = displayed; markerInitial = marker; clock.Restart(); animation.Start(); Invalidate();
+            if (displayed.ToArgb() == destination.ToArgb() && Math.Abs(marker - markerDestination) < .001F) { Snap(); return; }
+            // Repeated enter/focus notifications must not keep restarting an unchanged tween.
+            if (AnimationRunning && destination.ToArgb() == previousDestination.ToArgb() && markerDestination == previousMarker) return;
+            previousDestination = destination; previousMarker = markerDestination;
+            initial = displayed; markerInitial = marker; startedAt = now; duration = pressed ? 80 : 185;
+            UiAnimationClock.Add(animateFrame); Invalidate();
         }
-        private void Animate(object sender, EventArgs args)
+        private Color previousDestination;
+        private float previousMarker;
+        private void Animate(double now)
         {
             if (IsDisposed || Disposing || !Visible || Parent == null || !animationsEnabled) { Snap(); return; }
-            float progress = Math.Min(1, (float)clock.Elapsed.TotalMilliseconds / 150F);
-            float eased = 1F - (float)Math.Pow(1F - progress, 3);
+            float progress = Math.Min(1, (float)((now - startedAt) / duration));
+            float eased = UiAnimationClock.Ease(progress);
             displayed = UiStyle.Blend(initial, destination, eased); marker = markerInitial + (markerDestination - markerInitial) * eased;
-            Invalidate(); if (progress >= 1) { animation.Stop(); clock.Stop(); }
+            Invalidate(); if (progress >= 1) UiAnimationClock.Remove(animateFrame);
         }
         protected override void OnMouseEnter(EventArgs e) { base.OnMouseEnter(e); hovered = true; ChangeState(); }
         protected override void OnMouseLeave(EventArgs e) { base.OnMouseLeave(e); hovered = pressed = false; ChangeState(); }
@@ -185,7 +238,7 @@ namespace WorkLedger
         protected override void OnMouseUp(MouseEventArgs e) { base.OnMouseUp(e); pressed = false; ChangeState(); }
         protected override void OnEnabledChanged(EventArgs e) { base.OnEnabledChanged(e); ChangeState(); }
         protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); Snap(); }
-        protected override void OnHandleDestroyed(EventArgs e) { animation.Stop(); clock.Stop(); base.OnHandleDestroyed(e); }
+        protected override void OnHandleDestroyed(EventArgs e) { UiAnimationClock.Remove(animateFrame); base.OnHandleDestroyed(e); }
         protected override void OnVisibleChanged(EventArgs e) { base.OnVisibleChanged(e); if (!Visible) { hovered = pressed = false; Snap(); } }
         protected override void OnParentChanged(EventArgs e) { base.OnParentChanged(e); if (Parent == null) { hovered = pressed = false; Snap(); } }
         protected override void OnGotFocus(EventArgs e) { base.OnGotFocus(e); Invalidate(); }
@@ -215,7 +268,7 @@ namespace WorkLedger
             if (marker > 0)
             {
                 float barHeight = Math.Max(2, (Height - 18) * marker);
-                using (var brush = new SolidBrush(Color.FromArgb(101, 207, 211)))
+                using (var brush = new SolidBrush(Color.FromArgb((int)(255 * marker), 101, 207, 211)))
                 using (var path = UiStyle.Rounded(new RectangleF(1, (Height - barHeight) / 2, 3, barHeight), 1.5F)) g.FillPath(brush, path);
             }
             if (Focused && ShowFocusCues)
@@ -224,7 +277,7 @@ namespace WorkLedger
         protected override void OnPaintBackground(PaintEventArgs e) { }
         protected override void Dispose(bool disposing)
         {
-            if (disposing) { animation.Stop(); animation.Tick -= Animate; animation.Dispose(); clock.Stop(); }
+            if (disposing) UiAnimationClock.Remove(animateFrame);
             base.Dispose(disposing);
         }
         private static void DrawIcon(Graphics g, Rectangle bounds, string key, Color color)
@@ -275,59 +328,114 @@ namespace WorkLedger
         }
     }
 
-    // A short entrance transition owns its snapshot and never changes form opacity or focus.
-    public sealed class ViewTransition : IDisposable
+    // Keep the outgoing page visible while layout changes, then crossfade two stable frames.
+    public sealed class ViewTransition : IDisposable, IMessageFilter
     {
-        private readonly Timer timer = new Timer();
-        private readonly Stopwatch clock = new Stopwatch();
+        private readonly Action<double> animateFrame;
         private Control target;
         private Form form;
         private TransitionOverlay overlay;
-        private bool disposed;
+        private double startedAt;
+        private bool disposed, prepared, filtering;
         private bool enabled = true;
         public bool Enabled { get { return enabled; } set { enabled = value; if (!value) Cancel(); } }
-        public bool IsRunning { get { return timer.Enabled && overlay != null; } }
-        public ViewTransition() { timer.Interval = 15; timer.Tick += Tick; }
-        public void Begin(Control nextTarget, bool animate)
+        public bool IsRunning { get { return UiAnimationClock.Contains(animateFrame) && overlay != null; } }
+        public ViewTransition() { animateFrame = Tick; }
+        public void Prepare(Control nextTarget, bool animate)
         {
             if (disposed) return;
-            Cancel();
-            if (!enabled || !animate || nextTarget == null || nextTarget.IsDisposed || !nextTarget.IsHandleCreated
-                || !nextTarget.Visible || !nextTarget.Enabled || nextTarget.ClientSize.Width < 1 || nextTarget.ClientSize.Height < 1) return;
             Bitmap snapshot = null;
             try
             {
-                nextTarget.PerformLayout();
-                snapshot = new Bitmap(nextTarget.ClientSize.Width, nextTarget.ClientSize.Height);
-                nextTarget.DrawToBitmap(snapshot, new Rectangle(Point.Empty, nextTarget.ClientSize));
+                if (Usable(nextTarget, animate))
+                {
+                    snapshot = CaptureFrame(nextTarget);
+                }
+                Cancel();
+                if (snapshot == null) return;
                 target = nextTarget;
-                overlay = new TransitionOverlay(snapshot, nextTarget.BackColor) { Bounds = nextTarget.ClientRectangle, Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right };
+                overlay = new TransitionOverlay(snapshot) { Bounds = target.ClientRectangle, Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right };
                 snapshot = null;
-                target.Controls.Add(overlay); overlay.BringToFront();
+                target.Controls.Add(overlay); overlay.BringToFront(); prepared = true;
                 target.Disposed += TargetInvalidated; target.HandleDestroyed += TargetInvalidated;
                 target.VisibleChanged += TargetInvalidated; target.EnabledChanged += TargetInvalidated;
                 target.SizeChanged += TargetInvalidated; target.ParentChanged += TargetInvalidated;
                 form = target.FindForm();
                 if (form != null) { form.Deactivate += TargetInvalidated; form.ResizeBegin += TargetInvalidated; }
-                clock.Restart(); timer.Start();
+                Application.AddMessageFilter(this); filtering = true;
             }
             catch (ArgumentException) { Cancel(); }
             catch (InvalidOperationException) { Cancel(); }
             catch (System.Runtime.InteropServices.ExternalException) { Cancel(); }
             finally { if (snapshot != null) snapshot.Dispose(); }
         }
-        private void Tick(object sender, EventArgs e)
+        public void Begin(Control nextTarget, bool animate)
+        {
+            if (disposed) return;
+            if (!Usable(nextTarget, animate)) { Cancel(); return; }
+            if (!prepared || target != nextTarget || overlay == null) Prepare(nextTarget, animate);
+            if (overlay == null) return;
+            try
+            {
+                var host = target; var cover = overlay;
+                host.PerformLayout();
+                if (target != host || overlay != cover || host.IsDisposed) return;
+                cover.BringToFront(); prepared = false;
+                if (!cover.NativeSupported) { Cancel(); return; }
+                startedAt = UiAnimationClock.Now; UiAnimationClock.Add(animateFrame);
+            }
+            catch (ArgumentException) { Cancel(); }
+            catch (InvalidOperationException) { Cancel(); }
+            catch (System.Runtime.InteropServices.ExternalException) { Cancel(); }
+        }
+        internal Bitmap CaptureFrame(Control control)
+        {
+            var cover = overlay;
+            if (cover == null || target != control) return Capture(control);
+            bool visible = cover.Visible;
+            cover.Visible = false;
+            try
+            {
+                Bitmap frame = Capture(control);
+                using (Graphics graphics = Graphics.FromImage(frame)) cover.DrawOver(graphics, control.ClientRectangle);
+                return frame;
+            }
+            finally { if (!cover.IsDisposed) cover.Visible = visible; }
+        }
+        private bool Usable(Control control, bool animate)
+        {
+            return enabled && animate && control != null && !control.IsDisposed && control.IsHandleCreated && control.Visible
+                && control.Enabled && control.ClientSize.Width > 0 && control.ClientSize.Height > 0;
+        }
+        private static Bitmap Capture(Control control)
+        {
+            Bitmap snapshot = new Bitmap(control.ClientSize.Width, control.ClientSize.Height);
+            try { control.DrawToBitmap(snapshot, new Rectangle(Point.Empty, control.ClientSize)); return snapshot; }
+            catch { snapshot.Dispose(); throw; }
+        }
+        private void Tick(double now)
         {
             if (target == null || target.IsDisposed || !target.Visible || !target.Enabled || overlay == null || overlay.IsDisposed) { Cancel(); return; }
-            float progress = Math.Min(1, (float)clock.Elapsed.TotalMilliseconds / 180F);
-            overlay.Veil = (int)(255F * (float)Math.Pow(1 - progress, 2)); overlay.Invalidate();
-            if (progress >= 1) Cancel();
+            float progress = Math.Min(1, (float)((now - startedAt) / 200));
+            overlay.Opacity = 1F - UiAnimationClock.Ease(progress);
+            if (progress >= 1 || !overlay.NativeSupported) Cancel();
+        }
+        public bool PreFilterMessage(ref Message message)
+        {
+            if (target != null && (message.Msg == 0x201 || message.Msg == 0x204 || message.Msg == 0x207
+                || message.Msg == 0x20A || message.Msg == 0x20E || message.Msg == 0x100 || message.Msg == 0x104))
+            {
+                Control input = Control.FromChildHandle(message.HWnd);
+                if (input == target || (input != null && target.Contains(input))) Cancel();
+            }
+            return false;
         }
         private void TargetInvalidated(object sender, EventArgs e) { Cancel(); }
         public void Cancel()
         {
             if (disposed) return;
-            timer.Stop(); clock.Stop();
+            UiAnimationClock.Remove(animateFrame);
+            if (filtering) { Application.RemoveMessageFilter(this); filtering = false; }
             if (target != null)
             {
                 target.Disposed -= TargetInvalidated; target.HandleDestroyed -= TargetInvalidated;
@@ -335,38 +443,69 @@ namespace WorkLedger
                 target.SizeChanged -= TargetInvalidated; target.ParentChanged -= TargetInvalidated;
             }
             if (form != null) { form.Deactivate -= TargetInvalidated; form.ResizeBegin -= TargetInvalidated; }
-            var old = overlay; overlay = null; target = null; form = null;
+            var old = overlay; overlay = null; target = null; form = null; prepared = false;
             if (old != null) { if (old.Parent != null) old.Parent.Controls.Remove(old); old.Dispose(); }
         }
         public void Dispose()
         {
             if (disposed) return;
-            Cancel(); disposed = true; timer.Tick -= Tick; timer.Dispose();
+            Cancel(); disposed = true;
         }
         private sealed class TransitionOverlay : Control
         {
-            private readonly Bitmap snapshot;
-            private readonly Color background;
-            public int Veil = 255;
-            public TransitionOverlay(Bitmap image, Color backgroundColor)
+            private readonly Bitmap outgoing;
+            private readonly ImageAttributes attributes = new ImageAttributes();
+            private readonly ColorMatrix alpha = new ColorMatrix();
+            private float opacity = 1F;
+            internal bool NativeSupported;
+            [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+            private static extern bool SetLayeredWindowAttributes(IntPtr window, uint colorKey, byte opacity, uint flags);
+            internal float Opacity
             {
-                snapshot = image; background = backgroundColor; TabStop = false;
+                get { return opacity; }
+                set
+                {
+                    opacity = Math.Max(0, Math.Min(1, value));
+                    if (IsHandleCreated) NativeSupported = SetLayeredWindowAttributes(Handle, 0, (byte)Math.Round(opacity * 255), 2);
+                }
+            }
+            public TransitionOverlay(Bitmap image)
+            {
+                outgoing = image; TabStop = false;
                 SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.Opaque, true);
                 SetStyle(ControlStyles.Selectable, false);
             }
+            protected override CreateParams CreateParams
+            {
+                get
+                {
+                    var parameters = base.CreateParams;
+                    // Windows 10/11 composites the cached outgoing bitmap over the live incoming page.
+                    parameters.ExStyle |= 0x80000 | 0x20;
+                    return parameters;
+                }
+            }
+            protected override void OnHandleCreated(EventArgs e)
+            {
+                base.OnHandleCreated(e);
+                NativeSupported = SetLayeredWindowAttributes(Handle, 0, (byte)Math.Round(opacity * 255), 2);
+            }
             protected override void WndProc(ref Message m)
             {
-                // HTTRANSPARENT lets mouse input reach the live controls beneath the snapshot.
                 if (m.Msg == 0x84) { m.Result = new IntPtr(-1); return; }
                 base.WndProc(ref m);
             }
-            protected override void OnPaint(PaintEventArgs e)
+            protected override void OnPaint(PaintEventArgs e) { e.Graphics.DrawImageUnscaled(outgoing, Point.Empty); }
+            internal void DrawOver(Graphics graphics, Rectangle bounds)
             {
-                e.Graphics.DrawImageUnscaled(snapshot, Point.Empty);
-                using (var veil = new SolidBrush(Color.FromArgb(Math.Max(0, Math.Min(255, Veil)), background)))
-                    e.Graphics.FillRectangle(veil, ClientRectangle);
+                alpha.Matrix33 = opacity; attributes.SetColorMatrix(alpha);
+                graphics.DrawImage(outgoing, bounds, 0, 0, outgoing.Width, outgoing.Height, GraphicsUnit.Pixel, attributes);
             }
-            protected override void Dispose(bool disposing) { if (disposing) snapshot.Dispose(); base.Dispose(disposing); }
+            protected override void Dispose(bool disposing)
+            {
+                if (disposing) { outgoing.Dispose(); attributes.Dispose(); }
+                base.Dispose(disposing);
+            }
         }
     }
 }

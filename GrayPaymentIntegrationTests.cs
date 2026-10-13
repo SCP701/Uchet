@@ -65,13 +65,19 @@ namespace WorkLedger
             Record dollar = Pay(store, party, "USD-P", "2026-08-01", "income", "100", "USD", "standard", null);
             byte[] bytes = File.ReadAllBytes(store.DataPath); long revision = store.Revision; int audits = store.Audit.Count;
             QuarterlyTaxResult result = QuarterlyTaxes.Calculate(store, 2026, 3, "BYN");
-            Assert(result.Receipts == 1060m && result.Tax == 212m && result.Remaining == 848m, "tax uses white parts by payment date, not grey, expenses or a later quarter");
+            Assert(result.Receipts == 1060m && result.PreliminaryTax == 212m && result.Tax == 169.60m && result.Remaining == 848m, "tax uses white parts by payment date, not grey, expenses or a later quarter");
             Assert(result.Payments.Select(p => p.PaymentId).OrderBy(x => x).SequenceEqual(new[] { white.Id, mixed.Id }.OrderBy(x => x)), "only taxable payment IDs enter tax detail");
             TaxReceipt mixedReceipt = result.Payments.Single(p => p.PaymentId == mixed.Id);
             Assert(mixedReceipt.Amount == 60m && mixedReceipt.TotalAmount == 120m && mixedReceipt.GreyAmount == 60m, "mixed tax detail retains exact original, white and excluded grey amounts");
             Assert(QuarterlyTaxes.Calculate(store, 2026, 3, "USD").Receipts == 100m, "currency remains independent");
             Assert(QuarterlyTaxes.Calculate(store, 2026, 4, "BYN").Receipts == 200m, "payment date chooses quarter");
+            QuarterlyTaxResult allTime = QuarterlyTaxes.CalculateAllTime(store, "BYN");
+            Assert(allTime.AllTime && allTime.Receipts == 1260m && allTime.PreliminaryTax == 252m && allTime.Remaining == 1008m && allTime.Tax == 201.60m,
+                "all-time white portions exclude grey mixed portions and outgoing payments while including another quarter");
 
+            QuarterlyTaxResult customRange = QuarterlyTaxes.CalculateRange(store, new DateTime(2026, 8, 1), new DateTime(2026, 9, 1), "BYN");
+            Assert(customRange.CustomPeriod && customRange.Receipts == 1060m && customRange.Tax == 169.60m && customRange.Payments.Count == 2,
+                "custom dates reuse exact white and gray accounting portions");
             using (var form = new MainForm(store))
             {
                 form.ShowInTaskbar = false; form.Opacity = 0; form.ApplyInterfacePreferences(new UiPreferences { AnimationsEnabled = false });
