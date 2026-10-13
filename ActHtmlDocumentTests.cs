@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -88,6 +88,75 @@ namespace WorkLedger
                 True(Rows(html)[0].InnerText.Contains("60.1") && Rows(html)[1].InnerText.Contains("01.10.2026"), "versions and dates are not markers");
                 Eq(MoneyText(html.SelectSingleNode("//td[@data-role='total']").InnerText), "1050.00", "aggregate amount retained");
                 True(html.InnerText.Contains("Всего операций: 7") && html.InnerText.Contains("одна тысяча пятьдесят белорусских рублей"), "legacy count and amount words");
+            });
+            test("separate descriptive items preserve unknown prices for one and multiple operations", delegate {
+                foreach (string[] descriptions in new[] { new[] { "Единственная операция без распределения стоимости" },
+                    new[] { "Первая операция", "Вторая операция с версией 60.1 и датой 01.10.2026", "Третья операция\n- подробность" } })
+                {
+                    Record descriptive = act.Clone(); descriptive.Set(ActDocument.ItemsField, "");
+                    descriptive.Set("amount", "1050.00"); descriptive.Set("description", "СТАРЫЙ ОБЩИЙ ТЕКСТ 1. Старое 2. Другое");
+                    descriptive.Set(ActDocument.DescriptionField, "Актуальный заголовок");
+                    descriptive.Set(ActHtmlDocument.DescriptiveItemsField, ActHtmlDocument.SerializeDescriptions(descriptions));
+                    string summary; List<ActHtmlLine> displayRows = ActHtmlDocument.ReadDisplayRows(descriptive, out summary);
+                    Eq(summary, "Актуальный заголовок", "descriptive caption"); Eq(displayRows.Count, descriptions.Length, "stored descriptive row count");
+                    for (int i = 0; i < descriptions.Length; i++)
+                    {
+                        Eq(displayRows[i].Description, descriptions[i], "stored descriptive text");
+                        True(!displayRows[i].Quantity.HasValue && !displayRows[i].Price.HasValue && !displayRows[i].Amount.HasValue, "unknown price remains unknown");
+                    }
+                    XmlDocument html = WriteAndLoad(Path.Combine(folder, "descriptive-" + descriptions.Length + ".html"), store, descriptive);
+                    Eq(Rows(html).Count, descriptions.Length, "descriptive HTML rows");
+                    foreach (XmlNode row in Rows(html))
+                        foreach (int column in new[] { 3, 4, 5, 6, 9 }) Eq(row.SelectSingleNode("./td[" + column + "]").InnerText, "—", "unpriced descriptive field");
+                    True(!html.InnerText.Contains("СТАРЫЙ ОБЩИЙ ТЕКСТ"), "stale aggregate body absent");
+                    Eq(MoneyText(html.SelectSingleNode("//td[@data-role='total']").InnerText), "1050.00", "descriptive aggregate retained");
+                    True(html.InnerText.Contains("Всего операций: " + descriptions.Length), "descriptive count");
+                }
+                string serialized = ActHtmlDocument.SerializeDescriptions(new[] { "  Проверка <данных> & текста  " });
+                Record escaped = act.Clone(); escaped.Set(ActDocument.ItemsField, ""); escaped.Set(ActHtmlDocument.DescriptiveItemsField, serialized);
+                XmlDocument escapedHtml = WriteAndLoad(Path.Combine(folder, "descriptive-escaping.html"), store, escaped);
+                Eq(Rows(escapedHtml)[0].SelectSingleNode("./td[2]").InnerText, "Проверка <данных> & текста", "descriptive escaping and trimming");
+            });
+            test("invalid descriptive rows preserve prior output and ledger", delegate {
+                string path = Path.Combine(folder, "descriptive-preserve.html"); File.WriteAllText(path, "previous descriptive document", new UTF8Encoding(false));
+                long revision = store.Revision; byte[] before = File.ReadAllBytes(store.DataPath);
+                foreach (string invalid in new[] { "{broken", "null", "{}", "[]", "[null]", "[42]", "[{}]", "[true]", "[[\"nested\"]]", "[\" \"]",
+                    "[\"" + new string('x', 2001) + "\"]",
+                    "[" + String.Join(",", Enumerable.Range(1, 201).Select(i => "\"Операция " + i + "\"")) + "]", new string(' ', 100001) + "[]" })
+                {
+                    Record malformed = act.Clone(); malformed.Set(ActDocument.ItemsField, ""); malformed.Set(ActHtmlDocument.DescriptiveItemsField, invalid);
+                    Reject(delegate { ActHtmlDocument.WriteHtml(path, store, malformed); }, "invalid descriptive list");
+                    Eq(File.ReadAllText(path), "previous descriptive document", "old descriptive document retained");
+                }
+                Reject(delegate { ActHtmlDocument.SerializeDescriptions(null); }, "null descriptions");
+                Reject(delegate { ActHtmlDocument.SerializeDescriptions(new string[0]); }, "empty descriptions");
+                Reject(delegate { ActHtmlDocument.SerializeDescriptions(new[] { "Работа", " " }); }, "blank description");
+                Reject(delegate { ActHtmlDocument.SerializeDescriptions(new[] { new string('x', 2001) }); }, "oversized description");
+                Reject(delegate { ActHtmlDocument.SerializeDescriptions(Enumerable.Range(0, 201).Select(i => "Работа")); }, "too many descriptions");
+                Reject(delegate { ActHtmlDocument.SerializeDescriptions(Enumerable.Range(0, 100).Select(i => new string('x', 2000))); }, "oversized JSON list");
+                Eq(store.Revision, revision, "invalid descriptive revision"); True(before.SequenceEqual(File.ReadAllBytes(store.DataPath)), "invalid descriptive ledger");
+            });
+            test("priced and hourly sources outrank stale descriptive JSON", delegate {
+                Record priced = act.Clone(); priced.Set(ActHtmlDocument.DescriptiveItemsField, "{broken");
+                string summary; List<ActHtmlLine> rows = ActHtmlDocument.ReadDisplayRows(priced, out summary);
+                Eq(rows.Count, 5, "priced rows authoritative"); True(rows.All(row => row.Amount.HasValue), "priced amounts authoritative");
+                Record hourly = act.Clone(); hourly.Set(ActHtmlDocument.DescriptiveItemsField, "{broken");
+                Store.SetHourlyActLines(hourly, new[] { new HourlyActLine { Description = "Актуальная почасовая операция", Hours = 2, Rate = 25 } });
+                rows = ActHtmlDocument.ReadDisplayRows(hourly, out summary); Eq(rows.Count, 1, "hourly source authoritative");
+                Eq(rows[0].Description, "Актуальная почасовая операция", "hourly text authoritative"); Eq(rows[0].Amount.Value, 50m, "hourly amount authoritative");
+            });
+            test("imported heading joined to first numbered operation splits conservatively", delegate {
+                Record imported = act.Clone(); imported.Set(ActDocument.ItemsField, "");
+                imported.Set("description", "Системное администрирование1. Перенесены данные организации 2. Настроены параметры учета 3. Проверены версии 60.1 и дата 01.10.2026");
+                string summary; List<ActHtmlLine> rows = ActHtmlDocument.ReadDisplayRows(imported, out summary);
+                Eq(summary, "Системное администрирование", "joined heading isolated"); Eq(rows.Count, 3, "joined operation count");
+                Eq(rows[0].Description, "Перенесены данные организации", "joined first operation"); True(!rows[0].Price.HasValue, "joined unknown price retained");
+                XmlDocument html = WriteAndLoad(Path.Combine(folder, "joined-numbered-description.html"), store, imported); Eq(Rows(html).Count, 3, "joined HTML count");
+                foreach (string ambiguous in new[] { "Пакет1. Первая работа 3. Третья работа", "Пакет01. Первая работа 2. Вторая работа",
+                    "Версия 60.1 от 01.10.2026", "Пакет1. Первая работа 2. Вторая работа 1. Вложенная работа 3. Третья работа" })
+                {
+                    List<ActHtmlLine> ignored; string heading; True(!ActHtmlDocument.TryReadNumberedOperations(ambiguous, out ignored, out heading), "joined ambiguous input not split");
+                }
             });
             test("ambiguous numbering stays intact instead of inventing rows", delegate {
                 foreach (string description in new[] {

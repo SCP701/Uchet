@@ -7,7 +7,7 @@ if (!(Test-Path -LiteralPath $compiler)) { $compiler = Join-Path $env:WINDIR 'Mi
 if (!(Test-Path -LiteralPath $compiler)) { throw 'Не найден компилятор .NET Framework.' }
 $outputDir = Join-Path $projectDir 'dist'
 New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
-$references = @('/r:System.Windows.Forms.dll','/r:System.Drawing.dll','/r:System.Web.Extensions.dll','/r:System.Xml.Linq.dll','/r:System.IO.Compression.dll','/r:System.IO.Compression.FileSystem.dll')
+$references = @('/r:System.Security.dll','/r:System.Windows.Forms.dll','/r:System.Drawing.dll','/r:System.Web.Extensions.dll','/r:System.Xml.Linq.dll','/r:System.IO.Compression.dll','/r:System.IO.Compression.FileSystem.dll')
 $iconPath = Join-Path $projectDir 'resources\AppIcon.ico'
 if (!(Test-Path -LiteralPath $iconPath -PathType Leaf)) { throw 'Не найдена иконка приложения resources\AppIcon.ico.' }
 $common = @('/nologo','/platform:anycpu','/optimize+',('/win32manifest:'+(Join-Path $projectDir 'app.manifest')),('/win32icon:'+$iconPath))

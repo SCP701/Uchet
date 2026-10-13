@@ -6,6 +6,7 @@ using System.Linq;
 using System.Net;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Web.Script.Serialization;
 
 namespace WorkLedger
 {
@@ -20,6 +21,45 @@ namespace WorkLedger
     }
     public static class ActHtmlDocument
     {
+        public const string DescriptiveItemsField = "descriptiveItemsJson";
+
+        public static string SerializeDescriptions(IEnumerable<string> descriptions)
+        {
+            List<string> values = CheckedDescriptions(descriptions);
+            string json = new JavaScriptSerializer { MaxJsonLength = 100000 }.Serialize(values);
+            if (json.Length > 100000) throw new InvalidOperationException("Перечень работ слишком велик. Сократите описания или количество строк.");
+            return json;
+        }
+
+        private static List<string> CheckedDescriptions(IEnumerable<string> descriptions)
+        {
+            if (descriptions == null) throw new InvalidOperationException("Не указан перечень работ акта.");
+            List<string> values = descriptions.Take(201).ToList();
+            if (values.Count == 0 || values.Count > 200) throw new InvalidOperationException("В акте должно быть от 1 до 200 операций.");
+            for (int i = 0; i < values.Count; i++)
+            {
+                if (String.IsNullOrWhiteSpace(values[i]) || values[i].Trim().Length > 2000)
+                    throw new InvalidOperationException("Позиция " + (i + 1).ToString(CultureInfo.InvariantCulture) + ": укажите описание работы до 2000 символов.");
+                values[i] = values[i].Trim();
+            }
+            return values;
+        }
+
+        private static List<ActHtmlLine> ReadDescriptions(string raw)
+        {
+            try
+            {
+                if (raw.Length > 100000) throw new InvalidOperationException("Слишком большой перечень работ.");
+                object[] values = new JavaScriptSerializer { MaxJsonLength = 100000, RecursionLimit = 10 }.DeserializeObject(raw) as object[];
+                if (values == null || values.Any(value => !(value is string))) throw new InvalidOperationException("Перечень должен содержать только описания работ.");
+                return CheckedDescriptions(values.Cast<string>()).Select(value => new ActHtmlLine { Description = value }).ToList();
+            }
+            catch (Exception exception)
+            {
+                throw new InvalidOperationException("Не удалось прочитать перечень работ. Проверьте строки во вкладке «Работы». " + exception.Message, exception);
+            }
+        }
+
         private static readonly CultureInfo Russian = CultureInfo.GetCultureInfo("ru-RU");
         private static readonly int[] Grid = { 353, 2948, 970, 1037, 904, 1245, 883, 849, 1138 };
         public static List<ActHtmlLine> ReadDisplayRows(Record act, out string summary)
@@ -30,6 +70,13 @@ namespace WorkLedger
             if (total <= 0 || total > 1000000000000m) throw new InvalidOperationException("Укажите сумму акта больше нуля и не больше одного триллиона.");
             if (String.IsNullOrWhiteSpace(act.Get("workItems")) && String.IsNullOrWhiteSpace(act.Get(ActDocument.ItemsField)))
             {
+                if (!String.IsNullOrWhiteSpace(act.Get(DescriptiveItemsField)))
+                {
+                    List<ActHtmlLine> descriptions = ReadDescriptions(act.Get(DescriptiveItemsField));
+                    ValidateRows(descriptions, total);
+                    summary = act.Get(ActDocument.DescriptionField);
+                    return descriptions;
+                }
                 List<ActHtmlLine> operations; string heading;
                 if (TryReadNumberedOperations(act.Get("description"), out operations, out heading))
                 {
@@ -98,7 +145,14 @@ namespace WorkLedger
         {
             operations = null; heading = "";
             if (String.IsNullOrWhiteSpace(description)) return false;
-            var matches = Regex.Matches(description, @"(?<!\S)(\d+)[.)]\s+");
+            var matches = Regex.Matches(description, @"(?<!\S)(\d+)[.)]\s+").Cast<Match>().ToList();
+            // Some imported acts join the package heading directly to "1.".
+            // Accept that first marker only with an otherwise sequential 2..N list.
+            if (matches.Count > 0 && matches[0].Groups[1].Value == "2")
+            {
+                var attached = Regex.Matches(description.Substring(0, matches[0].Index), @"(?<=\p{L})(1)[.)]\s+");
+                if (attached.Count == 1) matches.Insert(0, attached[0]);
+            }
             if (matches.Count < 2 || matches.Count > 200) return false;
             var rows = new List<ActHtmlLine>();
             for (int i = 0; i < matches.Count; i++)

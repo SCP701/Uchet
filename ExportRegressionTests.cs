@@ -29,6 +29,7 @@ namespace WorkLedger
             CsvProtection(root);
             ActOperations(root);
             LongPlainActs(root);
+            DescriptiveActOperations(root);
             Console.WriteLine("Export regression tests passed.");
         }
         static void NumericPayments(string root)
@@ -193,6 +194,56 @@ namespace WorkLedger
             foreach (string name in longNames) Assert(sheet.Descendants(S + "row").Count(row => row.Elements(S + "c").Any(cell => Text(cell) == name)) == 1, "long legacy operations remain separate complete rows");
             Assert(File.ReadAllText(store.DataPath) == original, "document exports do not change stored records");
         }
+
+        static void DescriptiveActOperations(string root)
+        {
+            var store = new Store(Path.Combine(root, "descriptive-data"));
+            var own = new Record("settings"); own.Set("name", "Тестовая организация"); own.Set("currency", "BYN"); store.Upsert(own);
+            var party = new Record("party"); party.Set("name", "Заказчик отдельных работ"); party.Set("role", "client"); store.Upsert(party);
+            XNamespace W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+            string[][] cases = {
+                new[] { "Единственная операция без цены" },
+                Enumerable.Range(1, 7).Select(i => "Отдельная операция " + i).ToArray(),
+                new[] { new string('Ю', 2000) }
+            };
+            foreach (string[] descriptions in cases)
+            {
+                var act = new Record("act"); act.Set("number", "DESCRIPTIVE-" + descriptions.Length + "-" + descriptions[0].Length);
+                act.Set("date", "2026-10-13"); act.Set("partyId", party.Id); act.Set("direction", "income"); act.Set("currency", "BYN");
+                act.Set("status", "draft"); act.Set("amount", "1050.00");
+                // A stale old body must not replace authoritative separate descriptions,
+                // including the old long-plain Excel compatibility branch.
+                act.Set("description", new string('Я', 2300));
+                act.Set(ActHtmlDocument.DescriptiveItemsField, ActHtmlDocument.SerializeDescriptions(descriptions));
+                store.Upsert(act); act = store.Find(act.Id);
+                long revision = store.Revision; byte[] before = File.ReadAllBytes(store.DataPath);
+                string xlsx = Path.Combine(root, act.Get("number") + ".xlsx"), word = Path.Combine(root, act.Get("number") + ".docx");
+                HourlyActDocuments.WriteXlsx(xlsx, store, act); ActDocument.Export(store, act, word);
+                XDocument sheet = Sheet(xlsx), document;
+                using (var zip = ZipFile.OpenRead(word))
+                using (var stream = zip.GetEntry("word/document.xml").Open()) document = XDocument.Load(stream);
+                foreach (string description in descriptions)
+                {
+                    var excelRows = sheet.Descendants(S + "row").Where(row => row.Elements(S + "c").Any(cell => Text(cell) == description)).ToList();
+                    Assert(excelRows.Count == 1, "descriptive operation has one Excel row");
+                    var excelRow = excelRows.Single();
+                    foreach (string col in new[] { "D", "E", "F" })
+                        Assert(Text(excelRow.Elements(S + "c").Single(cell => ((string)cell.Attribute("r")).StartsWith(col, StringComparison.Ordinal))) == "—",
+                            "unpriced descriptive Excel operation does not invent " + col);
+                    var wordRows = document.Descendants(W + "tr").Where(row => row.Elements(W + "tc").Any(cell => String.Concat(cell.Descendants(W + "t").Select(x => x.Value)) == description)).ToList();
+                    Assert(wordRows.Count == 1 && wordRows[0].Elements(W + "tc").Count() == 9, "descriptive operation has one main Word row");
+                    foreach (int index in new[] { 3, 4, 5 })
+                        Assert(String.Concat(wordRows[0].Elements(W + "tc").ElementAt(index).Descendants(W + "t").Select(x => x.Value)) == "—",
+                            "unpriced descriptive Word operation has no guessed quantity/price/sum");
+                }
+                var total = sheet.Descendants(S + "row").Single(row => row.Elements(S + "c").Any(cell => Text(cell) == "Итого"));
+                Assert(total.Elements(S + "c").Single(cell => ((string)cell.Attribute("r")).StartsWith("F", StringComparison.Ordinal)).Element(S + "v").Value == "1050.00",
+                    "descriptive Excel grand total preserves ledger amount");
+                Assert(document.Descendants(W + "t").Any(x => x.Value.Replace("\u00A0", "").Replace("\u202F", "").Replace(" ", "") == "1050,00"), "descriptive Word grand total preserves ledger amount");
+                Assert(store.Revision == revision && before.SequenceEqual(File.ReadAllBytes(store.DataPath)), "descriptive document exports do not change ledger");
+            }
+        }
+
         static void LongPlainActs(string root)
         {
             var store = new Store(Path.Combine(root, "long-data"));

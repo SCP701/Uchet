@@ -44,6 +44,7 @@ namespace WorkLedger
         private const string CreateExternalActSection = "create-external-act";
         private QuarterlyTaxesPage taxesPage;
         private PaymentAccounting viewPaymentAccounting;
+        private Dictionary<string,ServiceBalance> viewServiceBalances=new Dictionary<string,ServiceBalance>();
         private System.Windows.Forms.Button updatesButton;
         private UiPreferences interfacePreferences;
         private readonly ViewTransition viewTransition = new ViewTransition();
@@ -91,9 +92,11 @@ namespace WorkLedger
             utilities.Controls.Add(CommandMenu("program", "Меню",
                 Command("settings", "Настройки", Settings),
                 Command("interface", "Интерфейс", OpenInterfaceSettings),
+                Command("service-mail", "Обслуживание — напоминания об оплате", OpenServiceMail),
                 null,
                 Command("backup", "Сохранить резервную копию", Backup),
                 Command("restore", "Восстановить из копии", Restore),
+                Command("reconciliation", "Акты и выписка — загрузка и проверка", OpenReconciliation),
                 null,
                 Command("updates", "Обновления", delegate { viewTransition.Cancel(); UpdateManager.Show(this, store, SetUpdateAvailable); })));
             header.SizeChanged += delegate
@@ -159,12 +162,13 @@ namespace WorkLedger
             Navigate(FirstVisibleSection());
             if (automationEnabled)
             {
-                Shown += delegate { RefreshMonthlyServiceAutomation(); monthlyTimer.Start(); };
+                Shown += delegate { RefreshMonthlyServiceAutomation(); ServiceReminderRuntime.Queue(store.DataDir); monthlyTimer.Start(); };
                 monthlyTimer.Interval = 60000;
                 monthlyTimer.Tick += delegate
                 {
                     try { ProcessMonthlyServiceActs(MonthlyServiceRuntime.Today); lastAutomationError = null; }
                     catch (Exception e) { ShowMonthlyServiceError(e.Message); }
+                    ServiceReminderRuntime.Queue(store.DataDir);
                 };
             }
             overview.SizeChanged += delegate { if (current == "overview" && IsHandleCreated && !refreshing) RefreshView(); };
@@ -198,6 +202,9 @@ namespace WorkLedger
             try
             {
                 ProcessMonthlyServiceActs(MonthlyServiceRuntime.Today);
+                var mail=ServiceMailSettings.Load(store.DataDir);
+                string mailStatus=ServiceReminderScheduler.Ensure(Application.ExecutablePath,store.DataDir,mail.Enabled);
+                if(mailStatus.StartsWith("Фоновая рассылка не настроена"))MonthlyServiceRuntime.Log(store.DataDir,mailStatus);
                 bool enabled = store.Of("party").Any(p => p.Get("monthlyServiceEnabled") == "true");
                 var result = MonthlyServiceScheduler.Ensure(Application.ExecutablePath, store.DataDir, enabled);
                 if (!result.Success && enabled)
@@ -209,6 +216,21 @@ namespace WorkLedger
                 else if (!enabled || (result.Success && monthlyNotice.ForeColor == Color.Firebrick)) monthlyNotice.Visible = false;
             }
             catch (Exception e) { ShowMonthlyServiceError(e.Message); }
+        }
+        public void OpenServiceMail()
+        {
+            viewTransition.Cancel();
+            using(var window=new ServiceReminderWindow(store,delegate(string id){var act=store.Find(id);if(act!=null)FocusRecord(act);}))
+                window.ShowDialog(this);
+            RefreshView();
+            if(automationEnabled) {
+                try {
+                    var settings=ServiceMailSettings.Load(store.DataDir);
+                    string status=ServiceReminderScheduler.Ensure(Application.ExecutablePath,store.DataDir,settings.Enabled);
+                    if(status.StartsWith("Фоновая рассылка не настроена"))MonthlyServiceRuntime.Log(store.DataDir,status);
+                    ServiceReminderRuntime.Queue(store.DataDir);
+                }catch(Exception e){MonthlyServiceRuntime.Log(store.DataDir,"Рассылка обслуживания: "+e.Message);}
+            }
         }
         private void ShowMonthlyServiceError(string message)
         {
@@ -397,7 +419,7 @@ namespace WorkLedger
                 if (dialog.ShowDialog(this) == DialogResult.OK) ApplyInterfacePreferences(dialog.ResultPreferences);
             }
         }
-        private static Icon LoadApplicationIcon()
+        internal static Icon LoadApplicationIcon()
         {
             using (Stream stream = typeof(MainForm).Assembly.GetManifestResourceStream("WorkLedger.AppIcon.ico"))
             {
@@ -734,6 +756,8 @@ namespace WorkLedger
             if (r.Get("direction") == "expense") yield return "Мы платим Выплата";
             if (r.Kind == "act")
             {
+                yield return r.Get("reviewStatus") == "pending" ? "Требует проверки" : r.Get("reviewStatus") == "matched" ? "Найдена связь" : r.Get("reviewStatus") == "checked" ? "Проверено" : "";
+                yield return r.Get("reviewNotes");
                 yield return Status(r); yield return F(store.AllocatedToAct(r.Id)); yield return F(store.ActGrossDue(r.Id));
                 yield return F(store.ActiveHolds(r.Id)); yield return F(store.ActDue(r.Id));
                 if (r.Get("status") == "sent") yield return "Получить подпись";
@@ -801,7 +825,9 @@ namespace WorkLedger
                 if (taxesPage != null) taxesPage.RefreshData();
                 return;
             }
-            viewPaymentAccounting = PaymentAccounting.Build(store.Records);
+            var viewRecords=store.Records;
+            viewPaymentAccounting = PaymentAccounting.Build(viewRecords);
+            viewServiceBalances=ServiceReminderLedger.Build(viewRecords,MonthlyServiceRuntime.Today).ToDictionary(b=>b.Act.Id);
             UpdateDateFilterDisplay();
             string sortedDateHeader = grid.SortedColumn != null && Object.Equals(grid.SortedColumn.Tag, "date") ? grid.SortedColumn.HeaderText : null;
             ListSortDirection dateSortDirection = grid.SortOrder == SortOrder.Descending ? ListSortDirection.Descending : ListSortDirection.Ascending;
@@ -864,6 +890,18 @@ namespace WorkLedger
                 int column = grid.Columns.Add("c" + grid.Columns.Count, h);
                 if (IsDateColumn(h)) grid.Columns[column].Tag = "date";
             }
+            if (Catalog.IsActSection(current))
+            {
+                string[] actPriority = { "Номер", "Дата", "Контрагент", "Сумма", "Валюта", "Проверка сверки", "К оплате", "Оплата" };
+                int index = 0;
+                foreach (string header in actPriority)
+                {
+                    var column = grid.Columns.Cast<DataGridViewColumn>().FirstOrDefault(c => c.HeaderText == header);
+                    if (column != null) column.DisplayIndex = index++;
+                }
+                var partyColumn = grid.Columns.Cast<DataGridViewColumn>().FirstOrDefault(c => c.HeaderText == "Контрагент");
+                if (partyColumn != null) { partyColumn.AutoSizeMode = DataGridViewAutoSizeColumnMode.None; partyColumn.Width = 240; }
+            }
             if (Catalog.IsPaymentSection(current))
             {
                 string[] priority = { "Дата", "Номер документа", "Номер", "Контрагент", "Сумма", "Белая часть", "Серая часть", "Валюта", "Акт вне", "Акт" };
@@ -896,6 +934,8 @@ namespace WorkLedger
         }
         private string Status(Record r)
         {
+            ServiceBalance service;
+            if(r.Get("serviceGenerated")=="true"&&viewServiceBalances.TryGetValue(r.Id,out service))return service.Status;
             if (r.Get("status") != "signed") return r.Get("status") == "cancelled" ? "Отменён" : "Ожидает подписи";
             if (store.ActGrossDue(r.Id) == 0) return "Оплачен";
             if (store.ActDue(r.Id) == 0) return "Удержание";
@@ -923,12 +963,6 @@ namespace WorkLedger
         {
             if (current == "audit") { ShowAudit(); return; }
             var r = Selected(); if (r == null) return;
-            if (r.Kind == "act" && r.Get("workItems") != "")
-            {
-                using (var editor = new HourlyActEditor(store, r))
-                    if (editor.ShowDialog(this) == DialogResult.OK) FocusRecord(editor.ResultRecord);
-                return;
-            }
             var schema = Catalog.Get(SectionForRecord(r)); if (schema == null) return;
             using (var editor = new RecordEditor(store, schema, r)) if (editor.ShowDialog(this) == DialogResult.OK) { RefillParties(); if (r.Kind == "payment") FocusRecord(editor.ResultRecord); else RefreshView(); if (r.Kind == "party") RefreshMonthlyServiceAutomation(); }
         }
@@ -1004,6 +1038,15 @@ namespace WorkLedger
             using (var dialog = new SaveFileDialog { Filter = "Книга Excel (*.xlsx)|*.xlsx|CSV (*.csv)|*.csv", FileName = SafeName(title.Text) + ".xlsx" })
             { if (dialog.ShowDialog(this) == DialogResult.OK) { if (Path.GetExtension(dialog.FileName).Equals(".csv", StringComparison.OrdinalIgnoreCase)) TableIO.WriteCsv(dialog.FileName, export.Headers, export.Rows); else TableIO.WriteXlsx(dialog.FileName, export.Headers, export.Rows); MessageBox.Show(this, "Выгрузка сохранена.", "Excel"); } }
         }
+        private void OpenReconciliation()
+        {
+            using (var review = new ReconciliationReviewDialog(store, delegate(Record record)
+            {
+                using (var editor = new RecordEditor(store, Catalog.Get(record.Kind), store.Find(record.Id))) editor.ShowDialog(this);
+            })) review.ShowDialog(this);
+            RefillParties(); RefreshView();
+        }
+
         private void Import()
         {
             var schema = Catalog.Get(current);
@@ -1075,6 +1118,8 @@ namespace WorkLedger
         public static void ValidateSnapshot(string path)
         {
             var data = new Store(path);
+            if(File.Exists(ServiceMailSettings.SettingsPath(path)))ServiceMailSettings.Load(path);
+            if(File.Exists(ServiceMailHistory.HistoryPath(path)))ServiceMailHistory.Load(path);
             foreach (var doc in data.Records.Where(r => r.Kind == "document" && r.Get("filePath") != ""))
                 if (!File.Exists(data.ResolveAttachment(doc.Get("filePath"))))
                     throw new InvalidDataException("В копии не хватает вложения документа «" + doc.Get("title") + "». База не заменена.");
@@ -1106,14 +1151,8 @@ namespace WorkLedger
         {
             var act = Selected();
             if (act == null || act.Kind != "act") throw new InvalidOperationException("Выберите акт в таблице.");
-            if (act.Get("workItems") != "")
-            {
-                using (var hourly = new HourlyActEditor(store, act))
-                    if (hourly.ShowDialog(this) == DialogResult.OK) FocusRecord(hourly.ResultRecord);
-                return;
-            }
-            using (var editor = new ActItemsEditor(store, act))
-                if (editor.ShowDialog(this) == DialogResult.OK) { RefreshView(); SelectId(editor.ResultRecord.Id); }
+            using (var editor = new RecordEditor(store, Catalog.Get(SectionForRecord(act)), act))
+                if (editor.ShowDialog(this) == DialogResult.OK) { RefillParties(); RefreshView(); SelectId(editor.ResultRecord.Id); }
         }
 
         private void ExportActWord()

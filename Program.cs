@@ -19,6 +19,7 @@ namespace WorkLedger
             if (dataDir.Length > Path.GetPathRoot(dataDir).Length) dataDir = dataDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
             try
             {
+                if (args.Contains("--send-service-reminders")) return ServiceReminderRuntime.RunBackground(dataDir);
                 if (args.Contains("--generate-monthly-acts")) return MonthlyServiceRuntime.RunBackground(dataDir);
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
@@ -30,6 +31,8 @@ namespace WorkLedger
                     AttachmentSafetyTests.Run(Path.Combine(dataDir, "attachment-safety-tests"));
                     ExportRegressionTests.Run(Path.Combine(dataDir, "export-regression-tests"));
                     EditorTests.Run(Path.Combine(dataDir, "editor-tests"));
+                    ReconciliationImportTests.Run(Path.Combine(dataDir, "reconciliation-tests"));
+                    ActCardEditorTests.Run(Path.Combine(dataDir, "act-card-editor-tests"));
                     if (HourlyActCoreTests.Run(Path.Combine(dataDir, "hourly-core-tests")) != 0) throw new Exception("Не прошли проверки почасовых актов.");
                     HourlyActComposerTests.Run(Path.Combine(dataDir, "hourly-ui-tests"));
                     HourlyActDocumentTests.Run(Path.Combine(dataDir, "hourly-document-tests"));
@@ -52,10 +55,11 @@ namespace WorkLedger
                     if (MonthlyActCoreTests.Run(Path.Combine(dataDir, "monthly-core-tests")) != 0) throw new Exception("Не прошли проверки ежемесячных актов.");
                     MonthlyServiceEditorTests.Run(Path.Combine(dataDir, "monthly-editor-tests"));
                     MonthlyServiceSchedulerTests.Run(Path.Combine(dataDir, "monthly-scheduler-tests"));
+                    ServiceReminderTests.Run(Path.Combine(dataDir,"service-reminder-tests"));
                     MonthlyServiceIntegrationTests.Run(Path.Combine(dataDir, "monthly-integration-tests"));
                     UpdateProtocolTests.Run(Path.Combine(dataDir, "update-protocol-tests"));
                     UpdateManagerTests.Run(Path.Combine(dataDir, "update-manager-tests"));
-                    File.WriteAllText(Path.Combine(dataDir, "test-result.txt"), "PASS: accounting, import/export, backup/restore, UI, hourly acts and numbering, act XLSX/print, personal interface settings and draft preservation, monthly service acts and background scheduler, external acts, tax selection and transfers, quarterly taxes, grey and white payment parts, SR total, compact command menus, signed update protocol and update settings", Encoding.UTF8);
+                    File.WriteAllText(Path.Combine(dataDir, "test-result.txt"), "PASS: accounting, import/export, backup/restore, UI, hourly acts and numbering, act XLSX/print, personal interface settings and draft preservation, monthly service acts and background scheduler, external acts, tax selection and transfers, quarterly taxes, grey and white payment parts, SR total, compact command menus, service payment email reminders, signed update protocol and update settings", Encoding.UTF8);
                     return 0;
                 }
                 UpdateJob startupJob = null;
@@ -91,7 +95,7 @@ namespace WorkLedger
             catch (Exception ex)
             {
                 try { Directory.CreateDirectory(dataDir); File.WriteAllText(Path.Combine(dataDir, "error.txt"), ex.ToString(), Encoding.UTF8); } catch { }
-                if (!args.Contains("--self-test") && !args.Contains("--generate-monthly-acts")) MessageBox.Show("Не удалось открыть приложение.\n" + ex.Message + "\n\nДанные: " + dataDir, "Акты и оплаты", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                if (!args.Contains("--self-test") && !args.Contains("--generate-monthly-acts") && !args.Contains("--send-service-reminders")) MessageBox.Show("Не удалось открыть приложение.\n" + ex.Message + "\n\nДанные: " + dataDir, "Акты и оплаты", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return 1;
             }
         }

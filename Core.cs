@@ -427,6 +427,57 @@ namespace WorkLedger
                 for (int i = 0; i < source.Count; i++) { source[i].Id = added[i].Id; source[i].Fields = new Dictionary<string, string>(added[i].Fields); }
             }
         }
+        public void ApplyReconciliation(IEnumerable<Record> incoming)
+        {
+            if (incoming == null) throw new ArgumentNullException("incoming");
+            lock (gate)
+            {
+                List<Record> source = incoming.ToList();
+                if (source.Count == 0) return;
+                if (source.Count > 10000) throw new InvalidOperationException("В одном файле сверки допускается до 10 000 записей.");
+                var staged = records.Select(r => r.Clone()).ToList();
+                var entries = new List<AuditEntry>();
+                var seen = new HashSet<string>(StringComparer.Ordinal);
+                string[] allowed = { "reviewStatus", "reviewNotes", "reviewPackageId", "candidateActIds", "sourceActCandidates", "sourcePositionsJson",
+                    "workItems", "printItemsJson", "descriptiveItemsJson", "printDescription", "description", "hours", "hourlyRate" };
+                foreach (Record value in source)
+                {
+                    if (value == null || String.IsNullOrWhiteSpace(value.Id) || !seen.Add(value.Id)
+                        || !new[] { "party", "act", "payment", "document" }.Contains(value.Kind))
+                        throw new InvalidOperationException("Файл сверки содержит неподдерживаемую или повторную запись.");
+                    Record candidate = value.Clone();
+                    Record old = staged.FirstOrDefault(r => r.Id == candidate.Id);
+                    if (old != null && old.Kind != candidate.Kind) throw new InvalidOperationException("Сверка не может менять тип записи.");
+                    if (old != null)
+                    {
+                        foreach (string key in old.Fields.Keys.Concat(candidate.Fields.Keys).Distinct())
+                            if (!allowed.Contains(key) && old.Get(key) != candidate.Get(key))
+                                throw new InvalidOperationException("Сверка не может менять поле «" + FieldLabel(key) + "» существующей записи.");
+                    }
+                    if (old == null && candidate.Get("archived") == "true") throw new InvalidOperationException("Новая запись сверки не может быть архивной.");
+                    Normalize(candidate);
+                    if (old != null)
+                    {
+                        foreach (string key in new[] { "number", "date", "partyId", "projectId", "contractId", "actId", "amount", "currency", "direction", "status", "signedDate", "accountingScope", "paymentScope", "notes", "archived" })
+                            if (old.Get(key) != candidate.Get(key)) throw new InvalidOperationException("Позиции сверки меняют учётные данные записи. Проверьте исходные суммы.");
+                        if (old.Fields.Count == candidate.Fields.Count && old.Fields.All(f => candidate.Get(f.Key) == (f.Value ?? ""))) continue;
+                        staged[staged.IndexOf(old)] = candidate;
+                    }
+                    else staged.Add(candidate);
+                    foreach (string key in LinkKeys)
+                    {
+                        Record target = staged.FirstOrDefault(r => r.Id == candidate.Get(key));
+                        if (target != null && target.Get("archived") == "true" && (old == null || old.Get(key) != target.Id))
+                            throw new InvalidOperationException("Нельзя привязать новую запись сверки к архивной карточке.");
+                    }
+                    entries.Add(MakeAudit(old == null ? "import" : "reconcile", old, candidate));
+                }
+                if (entries.Count == 0) return;
+                Validate(staged);
+                Commit(staged, entries);
+            }
+        }
+
         public void Archive(string id)
         {
             lock (gate)
@@ -560,6 +611,8 @@ namespace WorkLedger
         {
             switch (key)
             {
+                case "reviewStatus": return "Проверка сверки"; case "reviewNotes": return "Причина проверки"; case "reviewPackageId": return "Файл сверки";
+                case "candidateActIds": return "Возможные акты"; case "sourceActCandidates": return "Акты из исходников"; case "sourcePositionsJson": return "Позиции исходного документа";
                 case "notes": return "Примечания"; case "contact": return "Контактное лицо"; case "phone": return "Телефон"; case "email": return "Электронная почта"; case "requisites": return "Реквизиты"; case "location": return "Адрес объекта"; case "unit": return "Единица измерения"; case "filePath": return "Вложение"; case "archived": return "Архив"; case "reversed": return "Сторнировано"; case "name": return "Наименование"; case "number": return "Номер"; case "date": return "Дата";
                 case "monthlyServiceEnabled": return "Ежемесячное обслуживание"; case "monthlyServiceAmount": return "Сумма в месяц";
                 case "monthlyServiceCurrency": return "Валюта обслуживания"; case "monthlyServiceDescription": return "Наименование услуги";
@@ -744,6 +797,7 @@ namespace WorkLedger
             switch (action)
             {
                 case "create": return "Создано"; case "update": return "Изменено"; case "archive": return "В архив";
+                case "reconcile": return "Сверка дополнена";
                 case "restore": return "Восстановлено"; case "import": return "Импортировано"; case "reverse": return "Сторнировано"; default: return action;
             }
         }

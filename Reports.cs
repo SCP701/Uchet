@@ -524,7 +524,7 @@ namespace WorkLedger
             document.Details["Статус"] = act.Get("status") == "signed" ? "Подписан" : act.Get("status") == "cancelled" ? "Отменён" : "Черновик";
             string summary = "";
             List<ActHtmlLine> lines, numberedOperations; string numberedHeading;
-            if (String.IsNullOrWhiteSpace(act.Get("workItems")) && String.IsNullOrWhiteSpace(act.Get(ActDocument.ItemsField)) && act.Get("description").Length > 2000 &&
+            if (String.IsNullOrWhiteSpace(act.Get("workItems")) && String.IsNullOrWhiteSpace(act.Get(ActDocument.ItemsField)) && String.IsNullOrWhiteSpace(act.Get(ActHtmlDocument.DescriptiveItemsField)) && act.Get("description").Length > 2000 &&
                 !ActHtmlDocument.TryReadNumberedOperations(act.Get("description"), out numberedOperations, out numberedHeading))
                 lines = ActDocument.ReadItems(act).Select(line => new ActHtmlLine { Description = line.Description, Unit = line.Unit, Quantity = line.Quantity, Price = line.Price, Amount = line.Amount }).ToList();
             else lines = ActHtmlDocument.ReadDisplayRows(act, out summary);
@@ -570,7 +570,12 @@ namespace WorkLedger
             string root = SafeRoot(dataDir), database = Path.Combine(root, "ledger.json");
             if (!File.Exists(database)) throw new InvalidDataException("Не найдена база ledger.json.");
             RejectLink(database);
-            var files = new List<string> { database }; string attachments = Path.Combine(root, "attachments");
+            var files = new List<string> { database };
+            foreach(string name in new[]{"service-mail-history.json","service-mail-settings.json"}) {
+                string extra=Path.Combine(root,name);
+                if(File.Exists(extra)){RejectLink(extra);files.Add(extra);}
+            }
+            string attachments = Path.Combine(root, "attachments");
             if (Directory.Exists(attachments)) CollectFiles(attachments, files);
             if (files.Count > MaxFiles) throw new InvalidDataException("Слишком много файлов для резервной копии.");
             long total = 0;
@@ -612,7 +617,7 @@ namespace WorkLedger
                         string relative = ValidateEntryName(entry.FullName);
                         if (!seen.Add(relative.TrimEnd('/'))) throw new InvalidDataException("В архиве повторяется путь: " + relative);
                         bool directory = relative.EndsWith("/", StringComparison.Ordinal);
-                        if (relative != "ledger.json" && relative != "attachments/" && !relative.StartsWith("attachments/", StringComparison.Ordinal)) throw new InvalidDataException("В архиве посторонний файл: " + relative);
+                        if (relative != "ledger.json" && relative != "service-mail-history.json" && relative != "service-mail-settings.json" && relative != "attachments/" && !relative.StartsWith("attachments/", StringComparison.Ordinal)) throw new InvalidDataException("В архиве посторонний файл: " + relative);
                         if (relative == "ledger.json") { if (directory || entry.Length == 0) throw new InvalidDataException("База в архиве пуста."); databaseFound = true; }
                         if (entry.Length > MaxFile || entry.Length < 0) throw new InvalidDataException("Файл в архиве превышает 200 МБ.");
                         total = checked(total + entry.Length); if (total > MaxTotal) throw new InvalidDataException("Распакованный архив превышает 1 ГБ.");

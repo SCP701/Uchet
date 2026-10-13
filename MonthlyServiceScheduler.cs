@@ -230,7 +230,7 @@ namespace WorkLedger
             void Register(string taskName, string xml, string sid);
             void Delete(string taskName);
         }
-        private sealed class ComTaskBackend : ITaskBackend
+        internal sealed class ComTaskBackend : ITaskBackend
         {
             private object service, folder;
             public ComTaskBackend()

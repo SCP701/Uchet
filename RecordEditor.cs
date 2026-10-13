@@ -27,7 +27,10 @@ namespace WorkLedger
         private readonly ToolTip tips = new ToolTip();
         private readonly Label hint;
         private readonly Button save;
-        private readonly TabControl sections;
+        private TabControl sections;
+        private ActWorkItemsControl actWorks;
+        private Label actRequisites;
+        private bool actReferenceLoading;
         private bool autoSelecting;
         private Label monthlyServiceInfo;
         public Record ResultRecord { get; private set; }
@@ -40,6 +43,8 @@ namespace WorkLedger
                 ? new Record { Id = Guid.NewGuid().ToString("N"), Kind = schema.Kind }
                 : existing.Clone();
             if (source.Fields == null) source.Fields = new Dictionary<string, string>();
+            if (schema.Kind == "act" && store.Find(source.Id) == null && schema.SectionKey == Catalog.ExternalActSection && !source.Fields.ContainsKey("accountingScope"))
+                source.Set("accountingScope", "external");
             if (schema.Kind == "payment" && store.Find(source.Id) == null && !source.Fields.ContainsKey("paymentScope"))
                 source.Set("paymentScope", schema.SectionKey == Catalog.GrayPaymentSection ? "external" : "standard");
             Text = (existing == null || store.Find(existing.Id) == null ? "Добавить: " : "Изменить: ") + schema.Singular;
@@ -47,8 +52,9 @@ namespace WorkLedger
             BackColor = Color.FromArgb(247, 249, 252);
             ForeColor = Color.FromArgb(31, 41, 55);
             StartPosition = FormStartPosition.CenterParent;
-            Size = new Size(840, Math.Min(820, Screen.PrimaryScreen.WorkingArea.Height - 50));
-            MinimumSize = new Size(680, 520);
+            Size = schema.Kind == "act" ? new Size(1020, Math.Min(820, Screen.PrimaryScreen.WorkingArea.Height - 50))
+                : new Size(840, Math.Min(820, Screen.PrimaryScreen.WorkingArea.Height - 50));
+            MinimumSize = schema.Kind == "act" ? new Size(800, 610) : new Size(680, 520);
             ShowIcon = false;
             ShowInTaskbar = false;
             MaximizeBox = false;
@@ -57,19 +63,20 @@ namespace WorkLedger
             errors.ContainerControl = this;
             errors.BlinkStyle = ErrorBlinkStyle.NeverBlink;
 
-            Panel header = new Panel { Dock = DockStyle.Top, Height = 94, BackColor = Color.White };
+            Panel header = new Panel { Dock = DockStyle.Top, Height = schema.Kind == "act" ? 76 : 94, BackColor = Color.White };
             Label title = new Label
             {
                 Text = Text,
                 Font = new Font("Segoe UI", 17F, FontStyle.Bold),
-                AutoSize = false, Dock = DockStyle.Top, Height = 51, Padding = new Padding(24, 13, 20, 0)
+                AutoSize = false, Dock = DockStyle.Top, Height = schema.Kind == "act" ? 45 : 51, Padding = new Padding(24, 13, 20, 0)
             };
             Label subtitle = new Label
             {
-                Text = schema.Kind == "work" ? "Сумма работы рассчитывается по количеству и цене. * — обязательные поля."
+                Text = schema.Kind == "act" ? "Выберите контрагента и договор. Работы добавляйте отдельными строками; итог считается автоматически."
+                    : schema.Kind == "work" ? "Сумма работы рассчитывается по количеству и цене. * — обязательные поля."
                     : schema.Kind == "settings" ? "Реквизиты ИП и организации для счетов, актов и договоров."
                     : "Заполните карточку. * — обязательные поля.",
-                Dock = DockStyle.Bottom, Height = 36, Padding = new Padding(25, 0, 20, 0),
+                Dock = DockStyle.Bottom, Height = schema.Kind == "act" ? 31 : 36, Padding = new Padding(25, 0, 20, 0),
                 ForeColor = Color.FromArgb(100, 116, 139)
             };
             if (schema.Kind == "payment") paymentTitle = title;
@@ -77,7 +84,8 @@ namespace WorkLedger
             header.Controls.Add(title);
 
             Control content;
-            if (schema.Fields.Any(f => !String.IsNullOrWhiteSpace(f.Section)))
+            if (schema.Kind == "act") content = BuildActCard();
+            else if (schema.Fields.Any(f => !String.IsNullOrWhiteSpace(f.Section)))
             {
                 sections = new TabControl { Dock = DockStyle.Fill, Padding = new Point(12, 7) };
                 foreach (var group in schema.Fields.GroupBy(f => f.Section ?? "Карточка"))
@@ -90,8 +98,9 @@ namespace WorkLedger
             }
             else content = BuildFields(schema.Fields);
             WireRelatedReferences();
+            WireActReferences();
             WireMonthlyService();
-            Panel footer = new Panel { Dock = DockStyle.Bottom, Height = schema.Kind == "payment" ? 101 : 83, BackColor = Color.White, Padding = new Padding(24, 15, 24, 15) };
+            Panel footer = new Panel { Dock = DockStyle.Bottom, Height = schema.Kind == "payment" ? 101 : schema.Kind == "act" ? 75 : 83, BackColor = Color.White, Padding = new Padding(24, 15, 24, 15) };
             FlowLayoutPanel buttons = new FlowLayoutPanel
             {
                 Dock = DockStyle.Right, Width = 252, FlowDirection = FlowDirection.RightToLeft,
@@ -127,7 +136,171 @@ namespace WorkLedger
             UiStyle.ApplyTo(this); UiStyle.SetAnimations(this, UiPreferences.Load(store.DataDir).AnimationsEnabled);
             AcceptButton = save;
             CancelButton = cancel;
-            Shown += delegate { if (inputs.Count > 0) inputs.Values.First().Focus(); };
+            Shown += delegate { if (schema.Kind == "act") inputs["partyId"].Focus(); else if (inputs.Count > 0) inputs.Values.First().Focus(); };
+        }
+
+
+        private Control BuildActCard()
+        {
+            foreach (string key in new[] { "amount", "description", "hours" })
+                inputs.Add(key, MakeInput(schema.Fields.Single(field => field.Key == key)));
+            var body = new Panel { Dock = DockStyle.Fill };
+            var links = BuildActFieldCards(new[] { "partyId", "contractId" }, false);
+            links.Dock = DockStyle.Top; links.Height = 76; links.Padding = new Padding(16, 7, 16, 0);
+            sections = new TabControl { Dock = DockStyle.Fill, Padding = new Point(15, 7) };
+            var worksPage = new TabPage("Работы") { BackColor = BackColor };
+            actWorks = new ActWorkItemsControl(source, (TextBox)inputs["amount"], (TextBox)inputs["description"], (TextBox)inputs["hours"]);
+            worksPage.Controls.Add(actWorks); sections.TabPages.Add(worksPage);
+            var dataPage = new TabPage("Данные акта") { BackColor = BackColor };
+            var metadata = BuildActFieldCards(new[] { "number", "date", "projectId", "direction", "currency", "status", "dueDate", "signedDate" }, true);
+            actRequisites = new Label { AutoSize = true, Dock = DockStyle.Top, Padding = new Padding(17, 7, 17, 10),
+                ForeColor = Color.FromArgb(100, 116, 139), Font = new Font("Segoe UI", 9F), MaximumSize = new Size(940, 0) };
+            metadata.Controls.Add(actRequisites); actRequisites.BringToFront();
+            dataPage.Controls.Add(metadata); sections.TabPages.Add(dataPage);
+            var notesPage = new TabPage("Примечание") { BackColor = BackColor, Padding = new Padding(18, 15, 18, 15) };
+            var notes = (TextBox)MakeInput(schema.Fields.Single(field => field.Key == "notes")); notes.Dock = DockStyle.Fill; notes.MaxLength = 32767;
+            inputs.Add("notes", notes); notesPage.Controls.Add(notes);
+            notesPage.Controls.Add(new Label { Text = "Дополнительная информация по акту", Dock = DockStyle.Top, Height = 29, ForeColor = Color.FromArgb(100, 116, 139) });
+            sections.TabPages.Add(notesPage); sections.SelectedIndex = 0;
+            var reviewPage = new TabPage("Сверка с выпиской") { BackColor = BackColor };
+            reviewPage.Controls.Add(BuildFields(schema.Fields.Where(f => f.Key == "reviewStatus" || f.Key == "reviewNotes").ToList()));
+            sections.TabPages.Add(reviewPage);
+            body.Controls.Add(sections); body.Controls.Add(links);
+            return body;
+        }
+
+        private Panel BuildActFieldCards(string[] keys, bool scrollable)
+        {
+            var panel = new Panel { Dock = DockStyle.Fill, AutoScroll = scrollable, Padding = new Padding(16, 12, 16, 10) };
+            var table = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 2 };
+            table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            for (int index = 0; index < keys.Length; ++index)
+            {
+                FieldDef field = schema.Fields.Single(f => f.Key == keys[index]);
+                var cell = new Panel { Dock = DockStyle.Fill, Height = 75, Margin = new Padding(0, 0, index % 2 == 0 ? 18 : 0, 0) };
+                var label = new Label { Text = field.Label + (field.Required ? " *" : ""), Dock = DockStyle.Top, Height = 25 };
+                var input = MakeInput(field); input.Dock = DockStyle.Top; input.AccessibleName = field.Label;
+                inputs.Add(field.Key, input); fieldLabels[field.Key] = label;
+                cell.Controls.Add(input); cell.Controls.Add(label);
+                table.Controls.Add(cell, index % 2, index / 2);
+                if (index % 2 == 0) table.RowStyles.Add(new RowStyle(SizeType.Absolute, 75));
+                if (field.Key == "number" && store.Find(source.Id) == null)
+                {
+                    var number = (TextBox)input;
+                    number.Text = "Автоматически при сохранении (" + store.NextActNumber + ")";
+                    number.ForeColor = Color.FromArgb(100, 116, 139);
+                }
+            }
+            panel.Controls.Add(table); return panel;
+        }
+
+        public void ShowWorks() { if (sections != null && schema.Kind == "act") sections.SelectedIndex = 0; }
+        private string SelectedActValue(string key)
+        {
+            Choice choice = ((ComboBox)inputs[key]).SelectedItem as Choice;
+            return choice == null ? "" : choice.Value;
+        }
+        private void SelectActValue(string key, string value)
+        {
+            ComboBox combo = (ComboBox)inputs[key];
+            for (int i = 0; i < combo.Items.Count; ++i) if (((Choice)combo.Items[i]).Value == value) { combo.SelectedIndex = i; return; }
+            combo.SelectedIndex = 0;
+        }
+        private void RefillActReferences(string key)
+        {
+            ComboBox combo = (ComboBox)inputs[key]; string wanted = SelectedActValue(key);
+            string party = SelectedActValue("partyId"), project = SelectedActValue("projectId");
+            bool income = SelectedActValue("direction") == "income";
+            combo.Items.Clear(); combo.Items.Add(new Choice("", key == "contractId" ? "— Без договора —" : "— Без объекта —"));
+            foreach (Record record in store.Records.Where(r => r.Kind == (key == "contractId" ? "contract" : "project"))
+                .Where(r => r.Get("archived") != "true" || r.Id == source.Get(key))
+                .Where(r => key == "projectId" ? !income || party == "" || r.Get("partyId") == "" || r.Get("partyId") == party
+                    : (party == "" || r.Get("partyId") == party) && (project == "" || r.Get("projectId") == "" || r.Get("projectId") == project)
+                        && (r.Get("status") == "active" || r.Id == source.Get(key)))
+                .OrderBy(r => Catalog.Display(store, r), StringComparer.CurrentCultureIgnoreCase))
+                combo.Items.Add(new Choice(record.Id, Catalog.Display(store, record)));
+            SelectActValue(key, wanted);
+        }
+        private void WireActReferences()
+        {
+            if (schema.Kind != "act") return;
+            foreach (string key in new[] { "partyId", "projectId", "contractId", "currency", "direction" })
+            {
+                string changedKey = key;
+                ((ComboBox)inputs[key]).SelectedIndexChanged += delegate { if (!actReferenceLoading) ActReferenceChanged(changedKey); };
+            }
+            tips.SetToolTip(inputs["contractId"], "Договор подставляет контрагента, объект, валюту и направление. Срок оплаты и подпись указываются отдельно.");
+            tips.SetToolTip(inputs["partyId"], "После выбора контрагента доступны его договоры и объекты.");
+            actReferenceLoading = true;
+            try
+            {
+                RefillActReferences("projectId"); RefillActReferences("contractId");
+                if (store.Find(source.Id) == null && source.Get("contractId") != "") ApplyActContract();
+            }
+            finally { actReferenceLoading = false; }
+            UpdateActRequisites();
+        }
+        private void ApplyActContract()
+        {
+            Record contract = store.Find(SelectedActValue("contractId")); if (contract == null) return;
+            SelectActValue("partyId", contract.Get("partyId"));
+            SelectActValue("currency", contract.Get("currency")); SelectActValue("direction", contract.Get("direction"));
+            RefillActReferences("projectId"); SelectActValue("projectId", contract.Get("projectId"));
+        }
+        private void ActReferenceChanged(string key)
+        {
+            actReferenceLoading = true;
+            try
+            {
+                if (key == "contractId") { ApplyActContract(); RefillActReferences("contractId"); }
+                else
+                {
+                    if (key == "projectId")
+                    {
+                        Record project = store.Find(SelectedActValue("projectId"));
+                        if (project != null && SelectedActValue("direction") == "income" && project.Get("partyId") != "")
+                            SelectActValue("partyId", project.Get("partyId"));
+                    }
+                    RefillActReferences("projectId"); RefillActReferences("contractId");
+                    Record contract = store.Find(SelectedActValue("contractId"));
+                    if (contract != null && (contract.Get("currency") != SelectedActValue("currency") || contract.Get("direction") != SelectedActValue("direction")))
+                        SelectActValue("contractId", "");
+                    if (key == "partyId" && store.Find(source.Id) == null && SelectedActValue("contractId") == "")
+                    {
+                        ComboBox combo = (ComboBox)inputs["contractId"];
+                        var compatible = combo.Items.Cast<Choice>().Where(c => c.Value != "").Where(c =>
+                        {
+                            Record record = store.Find(c.Value);
+                            return record.Get("currency") == SelectedActValue("currency") && record.Get("direction") == SelectedActValue("direction");
+                        }).ToList();
+                        if (compatible.Count == 1) { SelectActValue("contractId", compatible[0].Value); ApplyActContract(); }
+                    }
+                }
+            }
+            finally { actReferenceLoading = false; }
+            UpdateActRequisites();
+        }
+        private void UpdateActRequisites()
+        {
+            if (actWorks != null) actWorks.SetCurrency(SelectedActValue("currency"));
+            if (actRequisites == null) return;
+            string partyId = SelectedActValue("partyId");
+            bool preserveSnapshots = store.Find(source.Id) != null && partyId == source.Get("partyId") && source.Get("partySnapshot") != "";
+            Record party = preserveSnapshots ? Store.GetActSnapshot(source, "partySnapshot") : null;
+            if (party == null) party = store.Find(partyId);
+            Record own = preserveSnapshots ? Store.GetActSnapshot(source, "organizationSnapshot") : null;
+            if (own == null) own = store.Of("settings").FirstOrDefault();
+            actRequisites.Text = "Реквизиты для документа\r\n" + RequisitesLine(own, "Моя организация") + "\r\n" + RequisitesLine(party, "Контрагент");
+            actRequisites.MaximumSize = new Size(Math.Max(600, ClientSize.Width - 60), 0);
+        }
+        private static string RequisitesLine(Record record, string role)
+        {
+            if (record == null) return role + ": не выбрана";
+            string text = role + ": " + record.Get("name");
+            if (record.Get("unp") != "") text += " · УНП " + record.Get("unp");
+            if (record.Get("bankAccount") != "") text += " · " + record.Get("bankAccount");
+            return text;
         }
 
         private Panel BuildFields(List<FieldDef> fields)
@@ -227,7 +400,7 @@ namespace WorkLedger
         private void WireRelatedReferences()
         {
             bool saved = store.Find(source.Id) != null;
-            if (saved && schema.Kind != "payment") return;
+            if (schema.Kind == "act" || saved && schema.Kind != "payment") return;
             foreach (string reference in new[] { "contractId", "actId" })
             {
                 Control input;
@@ -433,6 +606,38 @@ namespace WorkLedger
                 CultureInfo.InvariantCulture, out result);
         }
 
+
+        internal Record PrepareRecord()
+        {
+            if (schema.Kind != "act") throw new InvalidOperationException("Эта подготовка доступна только для акта.");
+            Record result = source.Clone();
+            foreach (FieldDef field in schema.Fields)
+            {
+                if (field.Key == "description" || field.Key == "hours") continue;
+                Control input = inputs[field.Key]; string value;
+                if (field.Type == "date")
+                {
+                    DateTimePicker date = (DateTimePicker)input;
+                    value = date.Checked ? Store.DateString(date.Value) : "";
+                }
+                else if (field.Type == "enum" || field.Type == "ref") value = SelectedActValue(field.Key);
+                else value = field.Key == "number" && store.Find(source.Id) == null ? "" : input.Text.Trim();
+                if (field.Required && value == "") throw new InvalidOperationException("Заполните поле «" + field.Label + "».");
+                if (field.Type == "money")
+                {
+                    decimal number;
+                    if (!TryDecimal(value, out number) || Decimal.Round(number, 2) != number)
+                        throw new InvalidOperationException("Введите сумму с точностью до копеек.");
+                    value = Store.MoneyString(number);
+                }
+                result.Set(field.Key, value);
+            }
+            actWorks.ApplyTo(result);
+            Record party = store.Find(result.Get("partyId"));
+            if (party != null && party.Get("archived") != "true") store.CaptureActSnapshots(result);
+            return result;
+        }
+
         private void SaveClick(object sender, EventArgs e)
         {
             errors.Clear();
@@ -443,6 +648,7 @@ namespace WorkLedger
             foreach (FieldDef field in schema.Fields)
             {
                 Control input = inputs[field.Key];
+                if (schema.Kind == "act" && (field.Key == "description" || field.Key == "hours")) continue;
                 if (!monthlyServiceEnabled && field.Key.StartsWith("monthlyService", StringComparison.Ordinal) &&
                     field.Key != "monthlyServiceEnabled") continue;
                 string value;
@@ -459,7 +665,7 @@ namespace WorkLedger
                     Choice selected = ((ComboBox)input).SelectedItem as Choice;
                     value = selected == null ? "" : selected.Value;
                 }
-                else value = input.Text.Trim();
+                else value = schema.Kind == "act" && field.Key == "number" && store.Find(source.Id) == null ? "" : input.Text.Trim();
                 string error = "";
                 if ((field.Required || monthlyServiceEnabled && IsRequiredMonthlyServiceField(field.Key)
                     || IsPaymentActField(field) && SelectedPaymentScope == "external") && String.IsNullOrWhiteSpace(value))
@@ -487,26 +693,12 @@ namespace WorkLedger
                 result.Fields[field.Key] = value;
             }
             string detailError = "";
-            string detailInput = "amount";
-            if (firstInvalid == null && schema.Kind == "act" && (source.Get("printItemsJson") != "" || source.Get("workItems") != ""))
+            if (firstInvalid == null && schema.Kind == "act")
             {
-                try
-                {
-                    if (Store.ParseMoney(result.Get("amount")) != Store.ParseMoney(source.Get("amount")))
-                        throw new InvalidOperationException(store.Find(source.Id) == null
-                            ? "Сначала сохраните акт с текущей суммой, затем измените её вместе со строками через «Позиции акта»."
-                            : "Изменяйте сумму вместе со строками через «Позиции акта».");
-                    if (source.Get("workItems") != "" && result.Get("hours") != source.Get("hours"))
-                    {
-                        detailInput = "hours";
-                        throw new InvalidOperationException("Часы изменяйте вместе со строками через «Позиции акта».");
-                    }
-                    ActDocument.ValidateItems(result, ActDocument.ReadItems(result));
-                }
+                try { actWorks.ApplyTo(result); }
                 catch (Exception exception)
                 {
-                    detailError = exception.Message;
-                    firstInvalid = inputs.ContainsKey(detailInput) ? inputs[detailInput] : inputs["amount"];
+                    detailError = exception.Message; firstInvalid = actWorks.WorkGrid;
                     errors.SetError(firstInvalid, detailError);
                 }
             }
@@ -520,6 +712,11 @@ namespace WorkLedger
             try
             {
                 save.Enabled = false;
+                if (schema.Kind == "act")
+                {
+                    Record party = store.Find(result.Get("partyId"));
+                    if (party != null && party.Get("archived") != "true") store.CaptureActSnapshots(result);
+                }
                 store.Upsert(result);
                 ResultRecord = store.Find(result.Id) ?? result;
                 DialogResult = DialogResult.OK;

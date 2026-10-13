@@ -134,6 +134,12 @@ namespace WorkLedger
         }
 
         private static FieldDef Notes() { return F("notes", "Примечание", "memo", false); }
+        private static FieldDef ReviewStatus()
+        {
+            return E("reviewStatus", "Проверка сверки", false, "pending", "Требует проверки", "matched", "Найдена связь", "checked", "Проверено");
+        }
+        private static FieldDef ReviewNotes() { return F("reviewNotes", "Причина проверки / связь с выпиской", "memo", false); }
+
         private static FieldDef Date() { return F("date", "Дата", "date", true); }
         private static FieldDef Number() { return F("number", "Номер", "text", true); }
         private static FieldDef Amount() { return F("amount", "Сумма", "money", true); }
@@ -189,7 +195,7 @@ namespace WorkLedger
                     F("number", "Номер", "text", false), Date(), Party(true), Project(false), Contract(false), Direction(), Amount(), Currency(), DueDate(),
                     F("hours", "Всего часов", "number", false),
                     E("status", "Статус", true, "draft", "Черновик", "sent", "Отправлен", "signed", "Подписан", "cancelled", "Отменён"),
-                    F("description", "Выполненные работы", "memo", false), F("signedDate", "Дата подписания", "date", false), Notes()),
+                    F("description", "Выполненные работы", "memo", false), F("signedDate", "Дата подписания", "date", false), Notes(), ReviewStatus(), ReviewNotes()),
                 new Schema("invoice", "Счета", "Счёт",
                     Number(), Date(), Party(true), Project(false), Contract(false), R("actId", "Акт", "act", false),
                     Amount(), Currency(), Direction(), DueDate(),
@@ -198,7 +204,7 @@ namespace WorkLedger
                     F("number", "Номер документа", "text", false), Date(),
                     E("paymentScope", "Вид оплаты", false, "standard", "Белая", "external", "Серая (Акты вне)", "", "По актам и распределениям"),
                     R("actId", "Акт", "act", false), Party(true), Project(false), Contract(false),
-                    Direction(), Amount(), Currency(), E("method", "Способ оплаты", true, "bank", "Банк", "cash", "Наличные", "other", "Другое"), Notes()),
+                    Direction(), Amount(), Currency(), E("method", "Способ оплаты", true, "bank", "Банк", "cash", "Наличные", "other", "Другое"), Notes(), ReviewStatus(), ReviewNotes()),
                 new Schema("expense", "Расходы", "Расход",
                     Date(), Party(false), Project(true),
                     E("category", "Категория", true, "materials", "Материалы", "labor", "Рабочие", "transport", "Транспорт", "rent", "Аренда", "other", "Прочее"),
@@ -209,7 +215,7 @@ namespace WorkLedger
                     E("type", "Причина", true, "warranty", "Гарантийное удержание", "penalty", "Штраф", "other", "Другое"), Notes()),
                 new Schema("document", "Документы", "Документ",
                     F("title", "Название", "text", true), Date(), Party(false), Project(false), Contract(false), R("actId", "Акт", "act", false),
-                    E("status", "Статус", true, "missing", "Не получен", "draft", "Черновик", "sent", "Отправлен", "signed", "Подписан"), Notes()),
+                    E("status", "Статус", true, "missing", "Не получен", "draft", "Черновик", "sent", "Отправлен", "signed", "Подписан"), Notes(), ReviewStatus(), ReviewNotes()),
                 new Schema("settings", "Моя организация", "Организация",
                     S("Создание актов", F("hourlyRate", "Стоимость часа", "money", false)),
                     S("Создание актов", F("nextActNumber", "Следующий номер акта (с 500)", "number", false)),
