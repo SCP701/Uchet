@@ -70,6 +70,24 @@ namespace WorkLedger
             }
             act.Set("direction", "expense"); HourlyActDocuments.WriteHtml(htmlPath, store, act); html = File.ReadAllText(htmlPath);
             Assert(html.Contains("<b>Исполнитель:</b> Наименование: Заказчик &lt;старый&gt;") && html.Contains("<b>Заказчик:</b> Наименование: Исполнитель &lt;старый&gt;"), "expense acts correctly reverse executor and customer");
+            // Hourly editing maintains workItems; unit conversion deliberately removes it.
+            act.Set(ActDocument.ItemsField, ActDocument.SerializeItems(new[] { new ActPrintLine { Description = "Старый кэш печати", Unit = "усл.", Quantity = 1, Price = 2.02m } }));
+            HourlyActDocuments.WriteXlsx(xlsxPath, store, act);
+            using (var zip = ZipFile.OpenRead(xlsxPath))
+            {
+                var worksheet = PackageXml(zip, "xl/worksheets/sheet1.xml");
+                Assert(!worksheet.Descendants(S + "t").Any(t => t.Value == "Старый кэш печати") && worksheet.Descendants(S + "t").Any(t => t.Value == description), "authoritative hourly descriptions override stale print JSON in Excel");
+                Assert(worksheet.Descendants(S + "t").Any(t => t.Value == "Часы") && worksheet.Descendants(S + "v").Any(v => v.Value == "0.000001"), "hourly headers and quantities follow authoritative workItems");
+            }
+            var converted = act.Clone(); converted.Fields.Remove("workItems"); converted.Fields.Remove("hours"); converted.Fields.Remove("hourlyRate");
+            converted.Set(ActDocument.ItemsField, ActDocument.SerializeItems(new[] { new ActPrintLine { Description = "Работа после смены единицы", Unit = "усл.", Quantity = 1, Price = 2.02m } }));
+            HourlyActDocuments.WriteXlsx(xlsxPath, store, converted);
+            using (var zip = ZipFile.OpenRead(xlsxPath))
+            {
+                var worksheet = PackageXml(zip, "xl/worksheets/sheet1.xml");
+                Assert(worksheet.Descendants(S + "t").Any(t => t.Value == "Работа после смены единицы") && worksheet.Descendants(S + "t").Any(t => t.Value == "усл."), "converted hourly act exports edited general positions and units");
+                Assert(worksheet.Descendants(S + "t").Any(t => t.Value == "Количество") && !worksheet.Descendants(S + "t").Any(t => t.Value == "Часы"), "converted act uses general quantity header");
+            }
             var legacy = new Record("act"); legacy.Set("number", "А-старый"); legacy.Set("date", "2026-10-12"); legacy.Set("amount", "15.70"); legacy.Set("currency", "BYN"); legacy.Set("description", "Старый акт"); legacy.Set("partyId", party.Id);
             HourlyActDocuments.WriteXlsx(xlsxPath, store, legacy);
             using (var zip = ZipFile.OpenRead(xlsxPath))

@@ -47,6 +47,7 @@ namespace WorkLedger
         private System.Windows.Forms.Button updatesButton;
         private UiPreferences interfacePreferences;
         private readonly ViewTransition viewTransition = new ViewTransition();
+        private readonly Icon applicationIcon;
         private string current = "overview";
         private bool refreshing;
         private TableData table = new TableData();
@@ -57,6 +58,7 @@ namespace WorkLedger
             store = data; automationEnabled = runAutomation;
             if (!File.Exists(store.DataPath)) { var settings = new Record("settings"); settings.Set("currency", "BYN"); store.Upsert(settings); }
             interfacePreferences = UiPreferences.Load(store.DataDir);
+            applicationIcon = LoadApplicationIcon(); Icon = applicationIcon; ShowIcon = true;
             Text = "Акты и оплаты — учёт работ"; Width = 1460; Height = 900; MinimumSize = new Size(1120, 680);
             StartPosition = FormStartPosition.CenterScreen; Font = new Font("Segoe UI", 10); BackColor = Background; ForeColor = Ink;
             var sidebar = new Panel { Dock = DockStyle.Left, Width = 232, BackColor = UiStyle.Sidebar, Padding = new Padding(12, 0, 8, 8) };
@@ -84,23 +86,25 @@ namespace WorkLedger
             title.Font = new Font("Segoe UI", 22, FontStyle.Bold); title.SetBounds(0, 0, 610, 44);
             hint.SetBounds(0, 49, 920, 30); hint.ForeColor = UiStyle.Muted; hint.AutoEllipsis = true;
             header.Controls.Add(title); header.Controls.Add(hint);
-            var utilities = new FlowLayoutPanel { Width = 400, Height = 40, FlowDirection = FlowDirection.RightToLeft, WrapContents = false, Anchor = AnchorStyles.Top | AnchorStyles.Right };
-            utilities.Controls.Add(Button("Интерфейс", OpenInterfaceSettings)); utilities.Controls.Add(Button("Настройки", Settings));
-            var dataButton = Button("Данные", delegate { });
-            var dataMenu = new ContextMenuStrip();
-            dataMenu.Items.Add("Сохранить резервную копию", null, delegate { Guard(Backup); });
-            dataMenu.Items.Add("Восстановить из копии", null, delegate { Guard(Restore); });
-            dataButton.Click += delegate { viewTransition.Cancel(); dataMenu.Show(dataButton, new Point(0, dataButton.Height)); };
-            dataButton.Disposed += delegate { dataMenu.Dispose(); };
-            utilities.Controls.Add(dataButton);
+            var utilities = new FlowLayoutPanel { Name = "programUtilities", Width = 130, Height = 40,
+                FlowDirection = FlowDirection.RightToLeft, WrapContents = false, Anchor = AnchorStyles.Top | AnchorStyles.Right };
+            utilities.Controls.Add(CommandMenu("program", "Меню",
+                Command("settings", "Настройки", Settings),
+                Command("interface", "Интерфейс", OpenInterfaceSettings),
+                null,
+                Command("backup", "Сохранить резервную копию", Backup),
+                Command("restore", "Восстановить из копии", Restore),
+                null,
+                Command("updates", "Обновления", delegate { viewTransition.Cancel(); UpdateManager.Show(this, store, SetUpdateAvailable); })));
             header.SizeChanged += delegate
             {
-                utilities.SetBounds(Math.Max(0, header.ClientSize.Width - 400), 2, 400, 40);
-                title.Width = Math.Max(240, header.ClientSize.Width - 414); hint.Width = header.ClientSize.Width;
+                utilities.SetBounds(Math.Max(0, header.ClientSize.Width - 130), 2, 130, 40);
+                title.Width = Math.Max(240, header.ClientSize.Width - 144); hint.Width = header.ClientSize.Width;
             };
             header.Controls.Add(utilities);
             actions.Dock = DockStyle.Top; actions.AutoSize = true; actions.AutoSizeMode = AutoSizeMode.GrowAndShrink; actions.MinimumSize = new Size(0, 44);
             actions.Padding = new Padding(0, 0, 0, 7);
+            actions.WrapContents = false; actions.Name = "sectionCommands";
             filters = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = true, Padding = new Padding(10, 8, 10, 4), BackColor = Color.White, Margin = new Padding(0) };
             filters.Paint += delegate(object sender, PaintEventArgs e) { using (var pen = new Pen(UiStyle.Border)) e.Graphics.DrawRectangle(pen, 0, 0, filters.ClientSize.Width - 1, filters.ClientSize.Height - 1); };
             search.Width = 225; search.TextChanged += delegate { RefreshView(); }; search.AccessibleName = "Поиск";
@@ -234,6 +238,82 @@ namespace WorkLedger
                 Padding = new Padding(12, 0, 12, 0), Margin = new Padding(0, 0, 7, 5), BackColor = primary ? UiStyle.Blue : Color.White, ForeColor = primary ? Color.White : Ink };
             b.Click += delegate { Guard(click); }; return b;
         }
+        private sealed class MenuCommand
+        {
+            public readonly string Id, Text;
+            public readonly Action Execute;
+            public readonly bool NeedsSelection;
+            public MenuCommand(string id, string text, Action execute, bool needsSelection)
+            { Id = id; Text = text; Execute = execute; NeedsSelection = needsSelection; }
+        }
+        private static MenuCommand Command(string id, string text, Action execute, bool needsSelection = false)
+        { return new MenuCommand(id, text, execute, needsSelection); }
+        private System.Windows.Forms.Button CommandMenu(string key, string caption, params MenuCommand[] commands)
+        {
+            var menu = new ContextMenuStrip { Name = key + "Menu", ShowImageMargin = false,
+                Font = this.Font, BackColor = UiStyle.Surface, ForeColor = Ink, Padding = new Padding(3) };
+            foreach (MenuCommand command in commands)
+            {
+                if (command == null) { menu.Items.Add(new ToolStripSeparator()); continue; }
+                MenuCommand entry = command;
+                var item = new ToolStripMenuItem(entry.Text) { Name = entry.Id, Tag = entry, Padding = new Padding(10, 7, 12, 7) };
+                item.Click += delegate { Guard(entry.Execute); };
+                menu.Items.Add(item);
+            }
+            menu.Opening += delegate
+            {
+                bool selected = Selected() != null;
+                foreach (ToolStripMenuItem item in menu.Items.OfType<ToolStripMenuItem>())
+                    item.Enabled = !((MenuCommand)item.Tag).NeedsSelection || selected;
+            };
+            System.Windows.Forms.Button button = null;
+            button = Button(caption + " ▾", delegate { menu.Show(button, new Point(0, button.Height)); });
+            button.Name = key + "Commands"; button.Tag = "command-menu:" + key;
+            button.AccessibleName = caption; button.AccessibleRole = AccessibleRole.ButtonMenu;
+            button.ContextMenuStrip = menu;
+            button.KeyDown += delegate(object sender, KeyEventArgs e)
+            {
+                if (e.KeyCode == Keys.Down || e.KeyCode == Keys.F4)
+                { menu.Show(button, new Point(0, button.Height)); e.Handled = true; e.SuppressKeyPress = true; }
+            };
+            button.Disposed += delegate { menu.Dispose(); };
+            return button;
+        }
+        private void BuildRecordCommands(string kind)
+        {
+            actions.Controls.Add(Button("+ Добавить", Add)); actions.Controls.Add(Button("Изменить", Edit));
+            var operations = new List<MenuCommand>();
+            if (Catalog.IsActSection(kind)) operations.Add(Command("act-items", "Позиции акта", EditActItems, true));
+            if (Catalog.IsActSection(kind) || Catalog.IsPaymentSection(kind)) operations.Add(Command("allocate", "Зачесть оплату", Allocate));
+            if (kind == "estimate") operations.Add(Command("create-act", "Создать акт", CreateAct, true));
+            if (Catalog.IsActSection(kind)) operations.Add(Command("create-invoice", "Создать счёт", CreateInvoice, true));
+            if (operations.Count > 0) operations.Add(null);
+            operations.Add(Command("archive", "В архив / вернуть", Archive, true));
+            actions.Controls.Add(CommandMenu("record-actions", "Действия", operations.ToArray()));
+
+            var documents = new List<MenuCommand>();
+            if (Catalog.IsActSection(kind) || kind == "invoice" || kind == "estimate" || kind == "contract")
+                documents.Add(Command("print-document", "Печатная форма", PrintDocument, true));
+            if (Catalog.IsActSection(kind))
+            {
+                documents.Add(Command("act-word", "Акт Word", ExportActWord, true));
+                documents.Add(Command("act-excel", "Акт в Excel", ExportActDocument, true));
+            }
+            if (kind != "work" && kind != "hold" && kind != "amendment")
+                documents.Add(Command("attach", "Прикрепить файл", Attach, true));
+            if (kind == "document") documents.Add(Command("open-file", "Открыть файл", OpenAttachment, true));
+            if (documents.Count > 0) actions.Controls.Add(CommandMenu("record-documents", "Документы", documents.ToArray()));
+
+            var data = new List<MenuCommand> { Command("export", "Excel / CSV", Export), Command("import", "Импорт", Import) };
+            if (Catalog.IsActSection(kind))
+            {
+                data.Add(null);
+                data.Add(Command("all-acts", kind == Catalog.ExternalActSection ? "Все акты вне" : "Все акты",
+                    delegate { ShowAllActs(kind == Catalog.ExternalActSection); }));
+            }
+            actions.Controls.Add(CommandMenu("record-data", "Данные", data.ToArray()));
+        }
+
         private UiButton NewNavButton(string key, string text)
         {
             return new UiButton { Text = text, Tag = key, Width = 202, Height = 36, TextAlign = ContentAlignment.MiddleLeft,
@@ -317,10 +397,20 @@ namespace WorkLedger
                 if (dialog.ShowDialog(this) == DialogResult.OK) ApplyInterfacePreferences(dialog.ResultPreferences);
             }
         }
+        private static Icon LoadApplicationIcon()
+        {
+            using (Stream stream = typeof(MainForm).Assembly.GetManifestResourceStream("WorkLedger.AppIcon.ico"))
+            {
+                if (stream == null) throw new InvalidDataException("Не найдена иконка приложения.");
+                using (Icon source = new Icon(stream, 32, 32)) return (Icon)source.Clone();
+            }
+        }
+
         protected override void Dispose(bool disposing)
         {
             if (disposing) { monthlyTimer.Stop(); monthlyTimer.Dispose(); filterTips.Dispose(); viewTransition.Dispose(); }
             base.Dispose(disposing);
+            if (disposing && applicationIcon != null) applicationIcon.Dispose();
         }
 
         private void Guard(Action action)
@@ -518,44 +608,30 @@ namespace WorkLedger
                 composer.Visible = true;
                 actions.Controls.Add(Button("Сохранить акт", delegate { composer.SaveDraft(); }));
                 actions.Controls.Add(Button("Предпросмотр", PreviewAct));
-                actions.Controls.Add(Button("Настроить стоимость часа", Settings));
-                actions.Controls.Add(Button(kind == CreateExternalActSection ? "Все акты вне" : "Все акты", delegate { ShowAllActs(kind == CreateExternalActSection); }));
+                actions.Controls.Add(CommandMenu("draft-actions", "Действия",
+                    Command("hourly-settings", "Настроить стоимость часа", Settings),
+                    Command("all-acts", kind == CreateExternalActSection ? "Все акты вне" : "Все акты",
+                        delegate { ShowAllActs(kind == CreateExternalActSection); })));
             }
             else if (kind == "taxes")
             {
                 EnsureTaxesPage();
                 taxesPage.Visible = true;
             }
-            else if (Catalog.Get(kind) != null && kind != "settings")
-            {
-                actions.Controls.Add(Button("+ Добавить", Add)); actions.Controls.Add(Button("Изменить", Edit));
-                actions.Controls.Add(Button("В архив / вернуть", Archive));
-                if (Catalog.IsActSection(kind) || Catalog.IsPaymentSection(kind)) actions.Controls.Add(Button("Зачесть оплату", Allocate));
-                if (kind == "estimate") actions.Controls.Add(Button("Создать акт", CreateAct));
-                if (Catalog.IsActSection(kind))
-                {
-                    actions.Controls.Add(Button("Позиции акта", EditActItems));
-                    actions.Controls.Add(Button("Акт Word", ExportActWord));
-                    actions.Controls.Add(Button("Создать счёт", CreateInvoice));
-                    actions.Controls.Add(Button("Акт в Excel", ExportActDocument));
-                    actions.Controls.Add(Button(kind == Catalog.ExternalActSection ? "Все акты вне" : "Все акты", delegate { ShowAllActs(kind == Catalog.ExternalActSection); }));
-                }
-                if (Catalog.IsActSection(kind) || kind == "invoice" || kind == "estimate" || kind == "contract") actions.Controls.Add(Button("Печатная форма", PrintDocument));
-                if (kind != "work" && kind != "hold" && kind != "amendment") actions.Controls.Add(Button("Прикрепить файл", Attach));
-                if (kind == "document") actions.Controls.Add(Button("Открыть файл", OpenAttachment));
-                actions.Controls.Add(Button("Excel / CSV", Export)); actions.Controls.Add(Button("Импорт", Import));
-            }
+            else if (Catalog.Get(kind) != null && kind != "settings") BuildRecordCommands(kind);
             else if (kind == "reports")
             {
-                actions.Controls.Add(report); actions.Controls.Add(Button("Выгрузить Excel", Export)); actions.Controls.Add(Button("Печать отчёта", PrintTable));
+                actions.Controls.Add(report);
+                actions.Controls.Add(CommandMenu("report-file", "Файл",
+                    Command("export", "Выгрузить Excel", Export), Command("print-table", "Печать отчёта", PrintTable)));
             }
-            else if (kind == "audit") actions.Controls.Add(Button("Выгрузить Excel", Export));
+            else if (kind == "audit") actions.Controls.Add(CommandMenu("audit-file", "Файл", Command("export", "Выгрузить Excel", Export)));
             else { actions.Controls.Add(Button("+ Новый акт", delegate { Navigate("create-act"); })); actions.Controls.Add(Button("+ Оплата", delegate { Navigate("payment"); Add(); })); actions.Controls.Add(Button("Отчёты", delegate { Navigate("reports"); })); }
             title.Text = IsActComposerSection(kind) ? (kind == CreateExternalActSection ? "Создать акт вне" : "Создать акт") : kind == "overview" ? "Обзор" : kind == "reports" ? "Отчёты и сверка" : kind == "audit" ? "История изменений" : kind == "taxes" ? "Налоги" : Catalog.Get(kind).Title;
             hint.Text = kind == CreateExternalActSection ? "Акт войдёт в общий учёт и сверку, вне выборки «Акты для налогового учёта»." : kind == "create-act" ? "Выберите контрагента, впишите работы и часы. Номер и сумма рассчитываются автоматически." : kind == "overview" ? "Показатели за всё время в выбранной валюте. Напоминания — на ближайшие 7 дней."
                 : kind == "expense" ? "Дополнительные затраты. Работы подрядчиков учитывайте актами, чтобы не посчитать расход дважды."
-                : kind == Catalog.GrayPaymentSection ? "Оплаты по «Актам вне», без налогов. «Зачесть оплату» уменьшает долг по акту."
-                : kind == "payment" ? "Белые оплаты и авансы. Кнопка «Зачесть оплату» связывает их с обычными актами."
+                : kind == Catalog.GrayPaymentSection ? "Оплаты по «Актам вне», без налогов. «Действия → Зачесть оплату» уменьшает долг по акту."
+                : kind == "payment" ? "Белые оплаты и авансы. «Действия → Зачесть оплату» связывает их с обычными актами."
                 : kind == Catalog.ExternalActSection ? "Акты вне входят в общий учёт и сверку, вне выборки «Акты для налогового учёта»."
                 : kind == "act" ? "В задолженность входят подписанные акты. Удержания показываются отдельно от суммы к оплате."
                 : kind == "taxes" ? "Белые поступления по датам оплат за квартал. Налог — 20%; серые оплаты исключены."
@@ -897,7 +973,7 @@ namespace WorkLedger
         private void OpenAttachment()
         {
             var r = Selected(); if (r == null || r.Get("filePath") == "") throw new InvalidOperationException("У записи нет прикреплённого файла.");
-            Open(store.ResolveAttachment(r.Get("filePath")));
+            Open(AttachmentSafety.ResolveForOpen(store, r.Get("filePath")));
         }
         private void Settings()
         {
@@ -1314,7 +1390,7 @@ namespace WorkLedger
             int pending = Financial("act", false).Count(r => r.Get("archived") != "true" && r.Get("status") == "sent");
             if (missing > 0 || pending > 0) { canvas.Controls.Add(Button("Недостающие документы: " + missing + " · Акты ожидают подписи: " + pending, delegate { Navigate("reports"); report.SelectedIndex = 5; })); reminders++; }
             if (reminders == 0) canvas.Controls.Add(new Label { Text = "Ближайших сроков оплаты и недостающих документов нет.", AutoSize = true, ForeColor = Color.FromArgb(93, 107, 124) });
-            var tips = new Label { Text = "Создайте акт, добавьте оплату и следите за расчётами здесь.\nЛишние разделы можно скрыть кнопкой «Интерфейс». Резервная копия доступна в меню «Данные».", AutoSize = true, MaximumSize = new Size(900, 0), Margin = new Padding(0, 22, 0, 0), ForeColor = Color.FromArgb(93, 107, 124) };
+            var tips = new Label { Text = "Создайте акт, добавьте оплату и следите за расчётами здесь.\nРазделы настраиваются через «Меню → Интерфейс». Резервная копия тоже доступна в меню.", AutoSize = true, MaximumSize = new Size(900, 0), Margin = new Padding(0, 22, 0, 0), ForeColor = Color.FromArgb(93, 107, 124) };
             canvas.Controls.Add(tips); count.Text = "Валюта: " + Curr + "    ·    Показатели за всё время";
         }
         private Control Card(string name, string value, string subtitle)

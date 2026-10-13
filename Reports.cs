@@ -14,6 +14,7 @@ namespace WorkLedger
     {
         const int MaxRows = 100000, MaxColumns = 256;
         const long MaxInputBytes = 128L * 1024 * 1024;
+        const string SafeCsvHeader = "Защита текста CSV", SafeCsvSentinel = "Учёт CSV v1";
         const string SheetNamespace = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
         static readonly XNamespace S = SheetNamespace;
 
@@ -28,7 +29,17 @@ namespace WorkLedger
             try { contents = File.ReadAllText(path, new UTF8Encoding(false, true)); }
             catch (DecoderFallbackException) { contents = File.ReadAllText(path, Encoding.GetEncoding(1251)); }
             if (contents.Length > 0 && contents[0] == '\uFEFF') contents = contents.Substring(1);
-            return ToRecords(ParseCsv(contents, DetectDelimiter(contents)));
+            var matrix = ParseCsv(contents, DetectDelimiter(contents));
+            var protectedRows = matrix.Where(row => row.Any(value => !String.IsNullOrWhiteSpace(value))).ToList();
+            bool protectedText = StripCsvMetadata(protectedRows);
+            if (!protectedText && matrix.Any(row => row.Count > MaxColumns)) throw new InvalidDataException("Максимум 256 столбцов для импорта.");
+            if (protectedText)
+            {
+                matrix = protectedRows;
+                foreach (var row in matrix)
+                    for (int column = 0; column < row.Count; column++) row[column] = DecodeCsvText(row[column]);
+            }
+            return ToRecords(matrix);
         }
 
         public static void WriteCsv(string path, List<string> headers, List<List<string>> rows)
@@ -38,8 +49,9 @@ namespace WorkLedger
             {
                 using (var writer = new StreamWriter(temporary, false, new UTF8Encoding(true)))
                 {
-                    writer.WriteLine(String.Join(";", headers.Select(CsvCell)));
-                    foreach (var row in rows) writer.WriteLine(String.Join(";", Enumerable.Range(0, headers.Count).Select(i => CsvCell(i < row.Count ? row[i] : ""))));
+                    string metadataHeader = CsvMetadataHeader(headers);
+                    writer.WriteLine(String.Join(";", headers.Select(value => CsvCell(EncodeCsvText("", value, true))).Concat(new[] { CsvCell(metadataHeader) })));
+                    foreach (var row in rows) writer.WriteLine(String.Join(";", Enumerable.Range(0, headers.Count).Select(i => CsvCell(EncodeCsvText(headers[i], i < row.Count ? row[i] : "", false))).Concat(new[] { CsvCell(SafeCsvSentinel) })));
                 }
             });
         }
@@ -110,7 +122,7 @@ namespace WorkLedger
                             cell.SetAttributeValue("r", ColumnName(column) + (number + offset).ToString(CultureInfo.InvariantCulture));
                             if (number == 1) cell.SetAttributeValue("s", 4);
                             else if (cell.Attribute("t") != null) cell.SetAttributeValue("s", 3);
-                            else cell.SetAttributeValue("s", headers[column] == "Часы" ? 5 : 6);
+                            else cell.SetAttributeValue("s", headers[column] == "Часы" || headers[column] == "Количество" ? 5 : 6);
                             string text = String.Concat(cell.Descendants(S + "t").Select(t => t.Value));
                             height = Math.Max(height, DocumentHeight(text, column == 1 ? 58 : 19));
                         }
@@ -285,10 +297,67 @@ namespace WorkLedger
                     if (c == '\r' && i + 1 < contents.Length && contents[i + 1] == '\n') i++;
                 }
                 else { if (justClosed && !Char.IsWhiteSpace(c)) throw new InvalidDataException("Недопустимые символы после кавычки CSV."); if (!justClosed) field.Append(c); }
-                if (row.Count > MaxColumns || rows.Count > MaxRows + 1) throw new InvalidDataException("Слишком много строк или столбцов в CSV.");
+                if (row.Count > MaxColumns + 1 || rows.Count > MaxRows + 1) throw new InvalidDataException("Слишком много строк или столбцов в CSV.");
             }
             if (quoted) throw new InvalidDataException("В CSV не закрыта кавычка.");
             if (field.Length > 0 || row.Count > 0 || justClosed) { row.Add(field.ToString()); rows.Add(row); } return rows;
+        }
+        // Real CSV headers remain the first row. The final versioned metadata
+        // column identifies reversible escaping without changing legacy imports.
+        static string CsvMetadataHeader(List<string> headers)
+        {
+            var names = new HashSet<string>(headers.Select(value => (value ?? "").Trim()), StringComparer.OrdinalIgnoreCase);
+            string candidate = SafeCsvHeader; int suffix = 2;
+            while (names.Contains(candidate)) candidate = SafeCsvHeader + " (" + (suffix++).ToString(CultureInfo.InvariantCulture) + ")";
+            return candidate;
+        }
+        static bool CsvMetadataName(string name)
+        {
+            if (name == SafeCsvHeader) return true;
+            string prefix = SafeCsvHeader + " (";
+            if (!name.StartsWith(prefix, StringComparison.Ordinal) || !name.EndsWith(")", StringComparison.Ordinal)) return false;
+            string suffix = name.Substring(prefix.Length, name.Length - prefix.Length - 1); int number;
+            return Int32.TryParse(suffix, NumberStyles.None, CultureInfo.InvariantCulture, out number) && number >= 2 && suffix == number.ToString(CultureInfo.InvariantCulture);
+        }
+        static bool StripCsvMetadata(List<List<string>> matrix)
+        {
+            if (matrix.Count == 0 || matrix[0].Count < 2 || matrix[0].Count > MaxColumns + 1) return false;
+            int width = matrix[0].Count;
+            if (!CsvMetadataName(matrix[0][width - 1])) return false;
+            if (matrix.Skip(1).Any(row => row.Count != width || row[width - 1] != SafeCsvSentinel)) return false;
+            foreach (var row in matrix) row.RemoveAt(width - 1);
+            return true;
+        }
+        static string EncodeCsvText(string header, string value, bool isHeader)
+        {
+            value = value ?? ""; decimal numeric;
+            if (!isHeader && !CsvLeadingControls(value) && TryNumericCell(header, value, out numeric)) return value;
+            if (value.StartsWith("'", StringComparison.Ordinal) || CsvFormulaRisk(value)) return "'" + value;
+            return value;
+        }
+        static string DecodeCsvText(string value)
+        {
+            if (value.StartsWith("''", StringComparison.Ordinal)) return value.Substring(1);
+            if (value.StartsWith("'", StringComparison.Ordinal) && CsvFormulaRisk(value.Substring(1))) return value.Substring(1);
+            return value;
+        }
+        static bool CsvFormulaRisk(string value)
+        {
+            int position = 0;
+            while (position < value.Length && (Char.IsWhiteSpace(value[position]) || Char.IsControl(value[position]) || Char.GetUnicodeCategory(value[position]) == UnicodeCategory.Format)) position++;
+            if (CsvLeadingControls(value)) return true;
+            if (position == value.Length) return false;
+            char first = value[position];
+            return first == '=' || first == '+' || first == '-' || first == '@' || first == '\uFF1D' || first == '\uFF0B' || first == '\uFF0D' || first == '\uFF20';
+        }
+        static bool CsvLeadingControls(string value)
+        {
+            foreach (char character in value)
+            {
+                if (Char.IsControl(character) || Char.GetUnicodeCategory(character) == UnicodeCategory.Format) return true;
+                if (!Char.IsWhiteSpace(character)) return false;
+            }
+            return false;
         }
         static string CsvCell(string value) { return "\"" + (value ?? "").Replace("\"", "\"\"") + "\""; }
         static void ValidateTable(List<string> headers, List<List<string>> rows)
@@ -303,7 +372,7 @@ namespace WorkLedger
         }
         static readonly HashSet<string> NumericHeaders = new HashSet<string>(new[]
         {
-            "Сумма", "Сумма за месяц", "Цена", "Количество", "Часы", "Цена за час", "Зачтено", "Остаток", "К оплате", "Удержано", "Прибыль", "Выручка", "Затраты", "Поступило", "Выплачено", "Закрыто", "Аванс", "С допсоглашениями", "Осталось", "Всего", "Оплачено", "Долг", "Выполнено", "Выполнено работ", "Начислено", "Расходы", "Сумма договора", "amount", "price", "quantity", "qty", "paid", "due", "Общий остаток", "Зачтено в акты", "Выручка по актам", "Акты подрядчиков", "Прочие расходы", "Всего затрат", "Поступило денег", "Выплачено денег", "Осталось авансом", "Цена за единицу", "Закрыто актами", "Осталось работ", "Нам должны", "Мы должны", "Изменение сальдо", "Сальдо", "Первоначальная сумма"
+            "Сумма", "Сумма за месяц", "Цена", "Количество", "Часы", "Цена за час", "Зачтено", "Остаток", "К оплате", "Удержано", "Прибыль", "Выручка", "Затраты", "Поступило", "Выплачено", "Закрыто", "Аванс", "С допсоглашениями", "Осталось", "Всего", "Оплачено", "Долг", "Выполнено", "Выполнено работ", "Начислено", "Расходы", "Сумма договора", "amount", "price", "quantity", "qty", "paid", "due", "Общий остаток", "Зачтено в акты", "Выручка по актам", "Акты подрядчиков", "Прочие расходы", "Всего затрат", "Поступило денег", "Выплачено денег", "Осталось авансом", "Цена за единицу", "Закрыто актами", "Осталось работ", "Нам должны", "Мы должны", "Изменение сальдо", "Сальдо", "Первоначальная сумма", "Белая часть", "Серая часть", "Зачтено в этом разделе", "Аванс в этом разделе"
         }, StringComparer.OrdinalIgnoreCase);
         static bool TryNumericCell(string header, string value, out decimal number)
         {
@@ -453,19 +522,26 @@ namespace WorkLedger
             document.Details["Валюта"] = act.Get("currency");
             if (act.Get("dueDate") != "") document.Details["Срок оплаты"] = DateText(act.Get("dueDate"));
             document.Details["Статус"] = act.Get("status") == "signed" ? "Подписан" : act.Get("status") == "cancelled" ? "Отменён" : "Черновик";
+            string summary = "";
+            List<ActHtmlLine> lines, numberedOperations; string numberedHeading;
+            if (String.IsNullOrWhiteSpace(act.Get("workItems")) && String.IsNullOrWhiteSpace(act.Get(ActDocument.ItemsField)) && act.Get("description").Length > 2000 &&
+                !ActHtmlDocument.TryReadNumberedOperations(act.Get("description"), out numberedOperations, out numberedHeading))
+                lines = ActDocument.ReadItems(act).Select(line => new ActHtmlLine { Description = line.Description, Unit = line.Unit, Quantity = line.Quantity, Price = line.Price, Amount = line.Amount }).ToList();
+            else lines = ActHtmlDocument.ReadDisplayRows(act, out summary);
+            if (!String.IsNullOrWhiteSpace(summary)) document.Details["Выполненные работы"] = summary;
+            decimal total = Store.ParseMoney(act.Get("amount"));
+            int number = 1;
             if (act.Get("workItems") != "")
             {
-                var lines = Store.GetHourlyActLines(act);
                 document.Headers.AddRange(new[] { "№", "Описание выполненных работ", "Часы", "Цена за час (" + act.Get("currency") + ")", "Сумма (" + act.Get("currency") + ")" });
-                int number = 1;
-                foreach (var line in lines) document.Rows.Add(new List<string> { (number++).ToString(CultureInfo.InvariantCulture), line.Description, HoursText(line.Hours), Store.MoneyString(line.Rate), Store.MoneyString(line.Amount) });
-                document.Rows.Add(new List<string> { "", "Итого", HoursText(lines.Sum(line => line.Hours)), "", Store.MoneyString(lines.Sum(line => line.Amount)) });
+                foreach (var line in lines) document.Rows.Add(new List<string> { (number++).ToString(CultureInfo.InvariantCulture), line.Description, QuantityText(line.Quantity), MoneyText(line.Price), MoneyText(line.Amount) });
+                document.Rows.Add(new List<string> { "", "Итого", HoursText(lines.Sum(line => line.Quantity.Value)), "", Store.MoneyString(total) });
             }
             else
             {
-                document.Headers.AddRange(new[] { "№", "Описание выполненных работ", "Сумма (" + act.Get("currency") + ")" });
-                document.Rows.Add(new List<string> { "1", act.Get("description"), Store.MoneyString(Store.ParseMoney(act.Get("amount"))) });
-                document.Rows.Add(new List<string> { "", "Итого", Store.MoneyString(Store.ParseMoney(act.Get("amount"))) });
+                document.Headers.AddRange(new[] { "№", "Описание выполненных работ", "Единица измерения", "Количество", "Цена за единицу (" + act.Get("currency") + ")", "Сумма (" + act.Get("currency") + ")" });
+                foreach (var line in lines) document.Rows.Add(new List<string> { (number++).ToString(CultureInfo.InvariantCulture), line.Description, String.IsNullOrWhiteSpace(line.Unit) ? "—" : line.Unit, QuantityText(line.Quantity), MoneyText(line.Price), MoneyText(line.Amount) });
+                document.Rows.Add(new List<string> { "", "Итого", "", "", "", Store.MoneyString(total) });
             }
             document.Footer = "Всего на сумму: " + Store.MoneyString(Store.ParseMoney(act.Get("amount"))) + " " + act.Get("currency") + ".";
             if (act.Get("notes") != "") document.Footer += "\nПримечания: " + act.Get("notes");
@@ -477,6 +553,8 @@ namespace WorkLedger
             DateTime date; return DateTime.TryParseExact(value, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out date) ? date.ToString("dd.MM.yyyy", CultureInfo.InvariantCulture) : value;
         }
         static string HoursText(decimal hours) { return hours.ToString("0.######", CultureInfo.InvariantCulture); }
+        static string QuantityText(decimal? value) { return value.HasValue ? HoursText(value.Value) : "—"; }
+        static string MoneyText(decimal? value) { return value.HasValue ? Store.MoneyString(value.Value) : "—"; }
         static string Signatory(Record organization)
         {
             if (organization == null) return "";

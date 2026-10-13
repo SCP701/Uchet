@@ -27,6 +27,8 @@ namespace WorkLedger
                     Directory.CreateDirectory(dataDir);
                     if (CoreTests.Run(Path.Combine(dataDir, "core-tests")) != 0) throw new Exception("Не прошли проверки расчётов.");
                     AppTests.Run(Path.Combine(dataDir, "app-tests"));
+                    AttachmentSafetyTests.Run(Path.Combine(dataDir, "attachment-safety-tests"));
+                    ExportRegressionTests.Run(Path.Combine(dataDir, "export-regression-tests"));
                     EditorTests.Run(Path.Combine(dataDir, "editor-tests"));
                     if (HourlyActCoreTests.Run(Path.Combine(dataDir, "hourly-core-tests")) != 0) throw new Exception("Не прошли проверки почасовых актов.");
                     HourlyActComposerTests.Run(Path.Combine(dataDir, "hourly-ui-tests"));
@@ -43,6 +45,7 @@ namespace WorkLedger
                     UiPreferencesTests.Run(Path.Combine(dataDir, "ui-preferences-tests"));
                     InterfaceUiTests.Run(Path.Combine(dataDir, "interface-ui-tests"));
                     UiStyleTests.Run();
+                    CompactToolbarTests.Run(Path.Combine(dataDir, "compact-toolbar-tests"));
                     FilterTests.Run(Path.Combine(dataDir, "filter-tests"));
                     if (ExternalActCoreTests.Run(Path.Combine(dataDir, "external-act-core-tests")) != 0) throw new Exception("Не прошли проверки актов вне.");
                     ExternalActIntegrationTests.Run(Path.Combine(dataDir, "external-act-integration-tests"));
@@ -52,7 +55,7 @@ namespace WorkLedger
                     MonthlyServiceIntegrationTests.Run(Path.Combine(dataDir, "monthly-integration-tests"));
                     UpdateProtocolTests.Run(Path.Combine(dataDir, "update-protocol-tests"));
                     UpdateManagerTests.Run(Path.Combine(dataDir, "update-manager-tests"));
-                    File.WriteAllText(Path.Combine(dataDir, "test-result.txt"), "PASS: accounting, import/export, backup/restore, UI, hourly acts and numbering, act XLSX/print, personal interface settings and draft preservation, monthly service acts and background scheduler, external acts, tax selection and transfers, quarterly taxes, grey and white payment parts, SR total, signed update protocol and update settings", Encoding.UTF8);
+                    File.WriteAllText(Path.Combine(dataDir, "test-result.txt"), "PASS: accounting, import/export, backup/restore, UI, hourly acts and numbering, act XLSX/print, personal interface settings and draft preservation, monthly service acts and background scheduler, external acts, tax selection and transfers, quarterly taxes, grey and white payment parts, SR total, compact command menus, signed update protocol and update settings", Encoding.UTF8);
                     return 0;
                 }
                 UpdateJob startupJob = null;

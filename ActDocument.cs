@@ -43,11 +43,6 @@ namespace WorkLedger
                 var hourly = Store.GetHourlyActLines(act).Select(x => new ActPrintLine { Description = x.Description, Unit = "ч", Quantity = x.Hours, Price = x.Rate }).ToList();
                 ValidateLines(hourly); return hourly;
             }
-            if (act.Get("workItems") != "")
-            {
-                var hourly = Store.GetHourlyActLines(act).Select(x => new ActPrintLine { Description = x.Description, Unit = "ч", Quantity = x.Hours, Price = x.Rate }).ToList();
-                ValidateLines(hourly); return hourly;
-            }
             string raw = act.Get(ItemsField);
             if (String.IsNullOrWhiteSpace(raw)) return new List<ActPrintLine> { new ActPrintLine { Description = String.IsNullOrWhiteSpace(act.Get("description")) ? "Выполненные работы (услуги)" : act.Get("description"), Unit = "шт", Quantity = 1, Price = Store.ParseMoney(act.Get("amount")) } };
             try
@@ -102,23 +97,23 @@ namespace WorkLedger
         internal static void ExportTemplate(Store store, Record act, string path, byte[] template)
         {
             if (store == null) throw new ArgumentNullException("store");
-            var lines = ReadItems(act); ValidateItems(act, lines);
+            string displaySummary;
+            var lines = ActHtmlDocument.ReadDisplayRows(act, out displaySummary);
             if (String.IsNullOrWhiteSpace(path) || !Path.GetExtension(path).Equals(".docx", StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("Выберите файл Word с расширением .docx.");
             Record own = Store.GetActSnapshot(act, "organizationSnapshot") ?? store.Of("settings").FirstOrDefault(), party = Store.GetActSnapshot(act, "partySnapshot") ?? store.Find(act.Get("partyId"));
             if (own == null || String.IsNullOrWhiteSpace(own.Get("name"))) throw new InvalidOperationException("Заполните название своей организации в настройках перед созданием акта.");
             if (party == null || party.Kind != "party" || String.IsNullOrWhiteSpace(party.Get("name"))) throw new InvalidOperationException("Не найден контрагент акта.");
             if (act.Get("direction") != "income" && act.Get("direction") != "expense") throw new InvalidOperationException("Укажите направление оплаты акта.");
             Record executor = act.Get("direction") == "income" ? own : party, customer = act.Get("direction") == "income" ? party : own;
-            string currency = Currency(act.Get("currency")), main = act.Get(DescriptionField);
-            if (String.IsNullOrWhiteSpace(main)) main = lines.Count > 1 ? "Выполненные работы (услуги), согласно приложению" : lines[0].Description;
-            if (String.IsNullOrWhiteSpace(main)) main = "Выполненные работы (услуги)";
-            if (main.Length > 2000) throw new InvalidOperationException("Итоговое описание услуги слишком длинное. Сократите его в окне «Позиции акта».");
-            decimal total = lines.Sum(x => x.Amount);
+            string currency = Currency(act.Get("currency")), summary = act.Get(DescriptionField);
+            if (String.IsNullOrWhiteSpace(summary)) summary = displaySummary;
+            if (summary.Length > 2000) throw new InvalidOperationException("Итоговое описание услуги слишком длинное. Сократите его в окне «Позиции акта».");
+            decimal total = Store.ParseMoney(act.Get("amount"));
             var values = new Dictionary<string, string>(StringComparer.Ordinal) {
                 { "{{EXECUTOR_NAME}}", executor.Get("name") }, { "{{EXECUTOR_DETAILS}}", Details(executor) }, { "{{EXECUTOR_CONTACT}}", Contact(executor) },
                 { "{{ACT_NUMBER}}", act.Get("number") }, { "{{ACT_DATE}}", FormatDate(act.Get("date")) },
                 { "{{CUSTOMER_NAME}}", customer.Get("name") }, { "{{CUSTOMER_DETAILS}}", Details(customer) }, { "{{CUSTOMER_CONTACT}}", Contact(customer) },
-                { "{{MAIN_DESCRIPTION}}", main }, { "{{MAIN_UNIT}}", "шт" }, { "{{MAIN_QTY}}", "1" }, { "{{MAIN_PRICE}}", Money(total) }, { "{{MAIN_AMOUNT}}", Money(total) }, { "{{MAIN_TOTAL}}", Money(total) },
+                { "{{SERVICE_SUMMARY}}", summary }, { "{{ITEM_COUNT}}", lines.Count.ToString(CultureInfo.InvariantCulture) },
                 { "{{TOTAL}}", Money(total) }, { "{{TOTAL_WORDS}}", AmountInWords(total, currency) },
                 { "{{CURRENCY_MAJOR_SHORT}}", currency == "EUR" ? "евро" : currency == "USD" ? "долл." : "руб." }, { "{{CURRENCY_MINOR_SHORT}}", currency == "USD" || currency == "EUR" ? "цент." : "коп." }
             };
@@ -127,33 +122,39 @@ namespace WorkLedger
                 ZipArchiveEntry part = zip.GetEntry("word/document.xml"); if (part == null) throw new InvalidOperationException("Шаблон Word повреждён.");
                 var document = LoadXml(part); var ns = Namespace(document);
                 var tables = document.SelectNodes("/w:document/w:body/w:tbl", ns).Cast<XmlElement>().ToList();
-                if (tables.Count != 2) throw new InvalidOperationException("Шаблон должен содержать таблицы основного акта и приложения.");
+                if (tables.Count != 1) throw new InvalidOperationException("Шаблон должен содержать одну таблицу операций акта.");
                 ValidateTemplate(document, ns, values.Keys);
+                var summaryParagraph = document.SelectNodes("/w:document/w:body/w:p", ns).Cast<XmlElement>()
+                    .SingleOrDefault(p => p.SelectNodes(".//w:t", ns).Cast<XmlElement>().Any(t => t.InnerText.Contains("{{SERVICE_SUMMARY}}")));
+                if (String.IsNullOrWhiteSpace(summary) && summaryParagraph != null) summaryParagraph.ParentNode.RemoveChild(summaryParagraph);
                 foreach (XmlElement node in document.SelectNodes("//w:t", ns).Cast<XmlElement>().ToList())
                 {
                     string original = node.InnerText;
                     string replacement = Regex.Replace(original, TokenPattern, delegate(Match match) {
-                        if (match.Value == "{{ITEM_COUNT}}") return AfterTable(node, tables[1]) ? lines.Count.ToString(CultureInfo.InvariantCulture) : "1";
                         string value; return values.TryGetValue(match.Value, out value) ? value : match.Value;
                     });
                     if (replacement != original) ReplaceText(node, replacement);
                 }
-                var detailRows = tables[1].SelectNodes("./w:tr", ns).Cast<XmlElement>().Where(row => row.SelectNodes(".//w:t", ns).Cast<XmlElement>().Any(t => t.InnerText.Contains("{{ITEM_NO}}"))).ToList();
-                if (detailRows.Count != 1) throw new InvalidOperationException("Не найдена образцовая строка приложения в шаблоне.");
+                var detailRows = tables[0].SelectNodes("./w:tr", ns).Cast<XmlElement>().Where(row => row.SelectNodes(".//w:t", ns).Cast<XmlElement>().Any(t => t.InnerText.Contains("{{ITEM_NO}}"))).ToList();
+                if (detailRows.Count != 1) throw new InvalidOperationException("Не найдена образцовая строка операции в шаблоне.");
                 var prototype = detailRows[0]; int index = 0;
                 foreach (var line in lines)
                 {
                     index++; var row = (XmlElement)prototype.CloneNode(true);
-                    var rowValues = new Dictionary<string, string>(StringComparer.Ordinal) { { "{{ITEM_NO}}", index.ToString(CultureInfo.InvariantCulture) }, { "{{ITEM_DESCRIPTION}}", line.Description }, { "{{ITEM_UNIT}}", line.Unit ?? "" }, { "{{ITEM_QTY}}", line.Quantity.ToString("0.######", Russian) }, { "{{ITEM_PRICE}}", Money(line.Price) }, { "{{ITEM_AMOUNT}}", Money(line.Amount) }, { "{{ITEM_TOTAL}}", Money(line.Amount) } };
+                    var rowValues = new Dictionary<string, string>(StringComparer.Ordinal) { { "{{ITEM_NO}}", index.ToString(CultureInfo.InvariantCulture) }, { "{{ITEM_DESCRIPTION}}", line.Description }, { "{{ITEM_UNIT}}", String.IsNullOrWhiteSpace(line.Unit) ? "—" : line.Unit }, { "{{ITEM_QTY}}", line.Quantity.HasValue ? line.Quantity.Value.ToString("0.######", Russian) : "—" }, { "{{ITEM_PRICE}}", line.Price.HasValue ? Money(line.Price.Value) : "—" }, { "{{ITEM_AMOUNT}}", line.Amount.HasValue ? Money(line.Amount.Value) : "—" }, { "{{ITEM_TOTAL}}", line.Amount.HasValue ? Money(line.Amount.Value) : "—" } };
                     foreach (XmlElement node in row.SelectNodes(".//w:t", ns).Cast<XmlElement>().ToList()) { string original = node.InnerText; string replacement = Regex.Replace(original, TokenPattern, delegate(Match match) { string value; return rowValues.TryGetValue(match.Value, out value) ? value : match.Value; }); if (replacement != original) ReplaceText(node, replacement); }
-                    tables[1].InsertBefore(row, prototype);
+                    KeepRowTogether(row, ns);
+                    foreach (XmlElement paragraph in row.SelectNodes(".//w:p", ns)) KeepWithNext(paragraph, ns, index == lines.Count);
+                    tables[0].InsertBefore(row, prototype);
                 }
-                tables[1].RemoveChild(prototype);
+                tables[0].RemoveChild(prototype);
                 foreach (var table in tables)
                 {
                     XmlElement header = table.SelectSingleNode("./w:tr", ns) as XmlElement; if (header == null) throw new InvalidOperationException("В таблице акта отсутствует заголовок.");
                     XmlElement properties = header.SelectSingleNode("./w:trPr", ns) as XmlElement; if (properties == null) { properties = document.CreateElement("w", "trPr", W); header.PrependChild(properties); }
                     if (properties.SelectSingleNode("./w:tblHeader", ns) == null) properties.AppendChild(document.CreateElement("w", "tblHeader", W));
+                    foreach (XmlElement paragraph in header.SelectNodes(".//w:p", ns)) KeepWithNext(paragraph, ns, true);
+                    foreach (XmlElement row in table.SelectNodes("./w:tr", ns)) KeepRowTogether(row, ns);
                     foreach (XmlElement height in table.SelectNodes("./w:tr/w:trPr/w:trHeight", ns)) if (height.GetAttribute("hRule", W) == "exact") height.SetAttribute("hRule", W, "atLeast");
                 }
                 WriteDocument(path, zip, document);
@@ -174,11 +175,31 @@ namespace WorkLedger
             return String.Join("\n", new[] { address == "" ? "" : "Адрес: " + address, record.Get("contact"), record.Get("phone"), record.Get("email") }.Where(x => !String.IsNullOrWhiteSpace(x)));
         }
         private static string Money(decimal value) { return value.ToString("N2", Russian); }
-        private static bool AfterTable(XmlNode node, XmlNode table)
+        private static void KeepRowTogether(XmlElement row, XmlNamespaceManager ns)
         {
-            XmlNode top = node; while (top.ParentNode != null && top.ParentNode.LocalName != "body") top = top.ParentNode;
-            if (top.ParentNode == null) return false;
-            bool seen = false; foreach (XmlNode child in top.ParentNode.ChildNodes) { if (child == table) seen = true; if (child == top) return seen; } return false;
+            XmlDocument document = row.OwnerDocument;
+            XmlElement properties = row.SelectSingleNode("./w:trPr", ns) as XmlElement;
+            if (properties == null) { properties = document.CreateElement("w", "trPr", W); row.PrependChild(properties); }
+            if (properties.SelectSingleNode("./w:cantSplit", ns) == null) properties.PrependChild(document.CreateElement("w", "cantSplit", W));
+        }
+        private static void KeepWithNext(XmlElement paragraph, XmlNamespaceManager ns, bool enabled)
+        {
+            XmlDocument document = paragraph.OwnerDocument;
+            XmlElement properties = paragraph.SelectSingleNode("./w:pPr", ns) as XmlElement;
+            if (properties == null) { properties = document.CreateElement("w", "pPr", W); paragraph.PrependChild(properties); }
+            XmlElement keep = properties.SelectSingleNode("./w:keepNext", ns) as XmlElement;
+            if (keep != null) properties.RemoveChild(keep);
+            XmlElement lines = properties.SelectSingleNode("./w:keepLines", ns) as XmlElement;
+            if (lines != null) properties.RemoveChild(lines);
+            XmlNode style = properties.SelectSingleNode("./w:pStyle", ns);
+            if (enabled)
+            {
+                keep = document.CreateElement("w", "keepNext", W);
+                if (style == null) properties.PrependChild(keep); else properties.InsertAfter(keep, style);
+            }
+            lines = document.CreateElement("w", "keepLines", W);
+            if (enabled) properties.InsertAfter(lines, keep);
+            else if (style == null) properties.PrependChild(lines); else properties.InsertAfter(lines, style);
         }
         private static void ValidateTemplate(XmlDocument doc, XmlNamespaceManager ns, IEnumerable<string> globalTokens)
         {

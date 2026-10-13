@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -123,7 +123,7 @@ namespace WorkLedger
                 Assert(snapshot.Get("amount") == "12.35" && ActDocument.ReadItems(snapshot).Count == 2 && ActDocument.ReadItems(snapshot)[0].Quantity == 1.234567m, "estimate snapshot lost precision, included archive, or changed total");
                 AssertUnchanged(store, checkpoint, checkpointBytes, "estimate snapshot preparation");
                 main.Navigate("act");
-                var labels = Field<FlowLayoutPanel>(main, "actions").Controls.Cast<Control>().Select(c => c.Text).ToList();
+                var labels = CompactToolbarTests.CommandLabels(Field<FlowLayoutPanel>(main, "actions")).ToList();
                 Assert(labels.Contains("Позиции акта") && labels.Contains("Акт Word") && labels.Contains("Печатная форма"), "Word/details actions missing or old print removed");
             }
             snapshot.Set("number", "А-снимок"); snapshot.Set("date", "2026-10-12"); store.Upsert(snapshot);

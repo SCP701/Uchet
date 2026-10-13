@@ -54,8 +54,7 @@ namespace WorkLedger
                 Control button = nav.Controls.Cast<Control>().Single(control => Convert.ToString(control.Tag) == section.Key);
                 Assert(button.Visible == expected.IsVisible(section.Key), "wrong visibility for " + section.Key);
             }
-            Assert(Descendants(form).OfType<Button>().Any(button => button.Visible && button.Enabled
-                && (button.Text == "Интерфейс" || Convert.ToString(button.Tag) == "interface")),
+            Assert(CompactToolbarTests.CanReachCommand(form, "interface"),
                 "personal interface settings cannot be reached after hiding menu entries");
         }
         private static void AssertLedgerUnchanged(Store store, byte[] original, long revision, string reason)

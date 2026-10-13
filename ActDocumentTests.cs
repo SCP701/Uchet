@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -55,12 +55,12 @@ namespace WorkLedger
             test("five detail rows exact totals escaped XML and no placeholders", delegate {
                 long revision = store.Revision; ActDocument.Export(store, act, five); Eq(store.Revision, revision);
                 XmlDocument doc = Document(five); var ns = Ns(doc); var tables = doc.SelectNodes("/w:document/w:body/w:tbl", ns);
-                Eq(tables.Count, 2); Eq(tables[0].SelectNodes("./w:tr", ns).Count, 5); Eq(tables[1].SelectNodes("./w:tr", ns).Count, 9);
+                Eq(tables.Count, 1); Eq(tables[0].SelectNodes("./w:tr", ns).Count, 9);
                 True(!doc.InnerText.Contains("{{")); True(doc.InnerText.Contains("Тестовый исполнитель & <Компания>")); True(doc.InnerText.Contains("TEST-EXEC-ACCOUNT")); True(doc.InnerText.Contains("TEST-CUSTOMER-TAX")); True(doc.InnerText.Contains("Адрес: Город Пример"));
-                True(doc.InnerText.Contains("Всего оказано услуг 1")); True(doc.InnerText.Contains("Всего оказано услуг 5")); True(doc.InnerText.Contains("780,00"));
+                True(!doc.InnerText.Contains("Всего оказано услуг 1")); True(doc.InnerText.Contains("Всего оказано услуг 5")); True(doc.InnerText.Contains("780,00"));
                 foreach (var line in lines) True(doc.InnerText.Contains(line.Description));
-                True(doc.InnerText.Contains("Акт № QA-500")); True(doc.InnerText.Contains("Приложение к акту № QA-500"));
-                True(doc.InnerText.Contains("Выполненные работы (услуги), согласно приложению"));
+                True(doc.InnerText.Contains("Акт № QA-500")); True(!doc.InnerText.Contains("Приложение к акту"));
+                True(!doc.InnerText.Contains("согласно приложению"));
             });
             test("opaque template package parts are byte identical", delegate {
                 using (var resource = typeof(ActDocument).Assembly.GetManifestResourceStream("WorkLedger.ActTemplate.docx")) using (var template = new ZipArchive(resource, ZipArchiveMode.Read)) using (var output = ZipFile.OpenRead(five))
@@ -91,9 +91,36 @@ namespace WorkLedger
                 Eq(read.Count, 1); Eq(read[0].Description, "Новое описание почасовых работ"); Eq(read[0].Quantity, 2m); Eq(read[0].Price, 50m); Eq(read[0].Unit, "ч"); ActDocument.ValidateItems(hourly, read);
                 string path = Path.Combine(folder, "hourly-authoritative.docx"); ActDocument.Export(store, hourly, path); True(Document(path).InnerText.Contains("Новое описание почасовых работ")); True(!Document(path).InnerText.Contains("Старое описание"));
             });
+            test("legacy numbered operations remain separate without invented prices", delegate {
+                Record legacy = Act(party, "QA-LEGACY-7", "income", "BYN", 1050);
+                legacy.Set("description", "Комплексное сопровождение учетной системы\n1. Обновление программного обеспечения 2. Проверка данных 3. Настройка печатной формы 4. Доработка контрольного отчета\n5. Настройка обмена данными 6. Проверка документов учета 7. Итоговая контрольная проверка");
+                store.Upsert(legacy); long revision = store.Revision; byte[] bytes = File.ReadAllBytes(store.DataPath); int audits = store.Audit.Count;
+                string path = Path.Combine(folder, "legacy-seven.docx"); ActDocument.Export(store, store.Find(legacy.Id), path);
+                var doc = Document(path); var ns = Ns(doc); var table = doc.SelectSingleNode("/w:document/w:body/w:tbl", ns);
+                Eq(doc.SelectNodes("/w:document/w:body/w:tbl", ns).Count, 1); Eq(table.SelectNodes("./w:tr", ns).Count, 11);
+                var operationRows = table.SelectNodes("./w:tr", ns).Cast<XmlNode>().Skip(1).Take(7).ToList();
+                for (int i = 0; i < operationRows.Count; i++)
+                {
+                    var cells = operationRows[i].SelectNodes("./w:tc", ns); Eq(cells.Count, 9); Eq(cells[0].InnerText, (i + 1).ToString(CultureInfo.InvariantCulture));
+                    foreach (int column in new[] { 2, 3, 4, 5, 7, 8 }) Eq(cells[column].InnerText, "—");
+                }
+                True(doc.InnerText.Contains("Всего оказано услуг 7")); True(doc.InnerText.Contains("1 050,00")); True(!doc.InnerText.Contains("Приложение"));
+                True(doc.SelectNodes("/w:document/w:body/w:p", ns).Cast<XmlNode>().Any(p => p.InnerText == "Комплексное сопровождение учетной системы"));
+                Eq(store.Revision, revision); Eq(store.Audit.Count, audits); True(bytes.SequenceEqual(File.ReadAllBytes(store.DataPath)));
+            });
+            test("known zero amount stays numeric and entered summary stays a caption", delegate {
+                Record free = Act(party, "QA-ZERO", "income", "BYN", 100);
+                free.Set(ActDocument.ItemsField, ActDocument.SerializeItems(new[] { L("Оплачиваемая операция", 1, 100), L("Бесплатная операция", 1, 0) }));
+                free.Set(ActDocument.DescriptionField, "Общее описание, введённое пользователем");
+                string path = Path.Combine(folder, "zero-priced.docx"); ActDocument.Export(store, free, path); var doc = Document(path); var ns = Ns(doc);
+                var row = doc.SelectSingleNode("/w:document/w:body/w:tbl/w:tr[3]", ns); var cells = row.SelectNodes("./w:tc", ns);
+                Eq(cells[1].InnerText, "Бесплатная операция"); Eq(cells[3].InnerText, "1"); Eq(cells[4].InnerText, "0,00"); Eq(cells[5].InnerText, "0,00"); Eq(cells[8].InnerText, "0,00");
+                True(doc.SelectNodes("/w:document/w:body/w:p", ns).Cast<XmlNode>().Any(p => p.InnerText == "Общее описание, введённое пользователем"));
+                True(doc.InnerText.Contains("Всего оказано услуг 2")); True(!doc.InnerText.Contains("Приложение"));
+            });
             test("long list repeats table header and preserves every row", delegate {
                 var many = Enumerable.Range(1, 21).Select(i => L("Позиция " + i + ": проверка, сопровождение и настройка учетной системы по согласованному заданию заказчика", 1, 10)).ToList(); Record large = Act(party, "QA-LONG", "income", "BYN", 210); large.Set(ActDocument.ItemsField, ActDocument.SerializeItems(many)); store.Upsert(large); large = store.Find(large.Id); ActDocument.Export(store, large, longList);
-                var doc = Document(longList); var ns = Ns(doc); Eq(doc.SelectNodes("/w:document/w:body/w:tbl[2]/w:tr", ns).Count, 25); Eq(doc.SelectNodes("/w:document/w:body/w:tbl/w:tr[1]/w:trPr/w:tblHeader", ns).Count, 2); True(doc.InnerText.Contains("Позиция 21:")); True(doc.InnerText.Contains("Всего оказано услуг 21"));
+                var doc = Document(longList); var ns = Ns(doc); Eq(doc.SelectNodes("/w:document/w:body/w:tbl/w:tr", ns).Count, 25); Eq(doc.SelectNodes("/w:document/w:body/w:tbl/w:tr[1]/w:trPr/w:tblHeader", ns).Count, 1); Eq(doc.SelectNodes("/w:document/w:body/w:tbl/w:tr/w:trPr/w:cantSplit", ns).Count, 25); Eq(doc.SelectNodes("/w:document/w:body/w:tbl/w:tr[last()-3]//w:pPr/w:keepNext", ns).Count, 9); Eq(doc.SelectNodes("/w:document/w:body/w:tbl/w:tr[last()-4]//w:pPr/w:keepNext", ns).Count, 0); True(doc.InnerText.Contains("Позиция 21:")); True(doc.InnerText.Contains("Всего оказано услуг 21"));
             });
             test("all supported currencies appear in words and headers", delegate {
                 foreach (string currency in new[] { "BYN", "RUB", "USD", "EUR" })

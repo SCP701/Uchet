@@ -8,12 +8,14 @@ if (!(Test-Path -LiteralPath $compiler)) { throw 'Не найден компил
 $outputDir = Join-Path $projectDir 'dist'
 New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
 $references = @('/r:System.Windows.Forms.dll','/r:System.Drawing.dll','/r:System.Web.Extensions.dll','/r:System.Xml.Linq.dll','/r:System.IO.Compression.dll','/r:System.IO.Compression.FileSystem.dll')
-$common = @('/nologo','/platform:anycpu','/optimize+',('/win32manifest:'+(Join-Path $projectDir 'app.manifest')))
+$iconPath = Join-Path $projectDir 'resources\AppIcon.ico'
+if (!(Test-Path -LiteralPath $iconPath -PathType Leaf)) { throw 'Не найдена иконка приложения resources\AppIcon.ico.' }
+$common = @('/nologo','/platform:anycpu','/optimize+',('/win32manifest:'+(Join-Path $projectDir 'app.manifest')),('/win32icon:'+$iconPath))
 $sourceFiles = @(Get-ChildItem -LiteralPath $projectDir -Filter '*.cs' | ForEach-Object { $_.FullName })
 $outputExe = Join-Path $outputDir 'AktiOplaty.exe'
-& $compiler @common @references ('/resource:'+(Join-Path $projectDir 'resources\ActTemplate.docx')+',WorkLedger.ActTemplate.docx') /target:winexe ('/out:'+$outputExe) @sourceFiles
+& $compiler @common @references ('/resource:'+(Join-Path $projectDir 'resources\ActTemplate.docx')+',WorkLedger.ActTemplate.docx') ('/resource:'+$iconPath+',WorkLedger.AppIcon.ico') /target:winexe ('/out:'+$outputExe) @sourceFiles
 if ($LASTEXITCODE -ne 0) { throw 'Сборка приложения не удалась.' }
-$helperSources = @('UpdateProtocol.cs','TrustedUpdateKey.cs','Core.cs','Reports.cs','AssemblyInfo.cs','updater\UpdaterProgram.cs') | ForEach-Object { Join-Path $projectDir $_ }
+$helperSources = @('UpdateProtocol.cs','TrustedUpdateKey.cs','Core.cs','Reports.cs','ActDocument.cs','ActHtmlDocument.cs','AssemblyInfo.cs','updater\UpdaterProgram.cs') | ForEach-Object { Join-Path $projectDir $_ }
 & $compiler @common @references /target:winexe ('/out:'+(Join-Path $outputDir 'Updater.exe')) @helperSources
 if ($LASTEXITCODE -ne 0) { throw 'Сборка модуля обновления не удалась.' }
 $releaseSources = @('UpdateProtocol.cs','TrustedUpdateKey.cs','maintenance\ReleaseTool.cs') | ForEach-Object { Join-Path $projectDir $_ }

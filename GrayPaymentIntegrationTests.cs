@@ -84,7 +84,7 @@ namespace WorkLedger
                 Assert(table.Rows[mixedIndex][table.Headers.IndexOf("Белая часть")] == Money(60m) && table.Rows[mixedIndex][table.Headers.IndexOf("Серая часть")] == Money(60m), "mixed row exposes parts without rewriting its full payment");
                 Assert(form.NewRecordForCurrentSection().Kind == "payment" && form.NewRecordForCurrentSection().Get("paymentScope") == "external", "grey creation seeds a payment with an explicit grey scope");
                 Assert(form.SectionForRecord(grey) == Catalog.GrayPaymentSection && form.SectionForRecord(mixed) == "payment", "record navigation routes whole grey payments and mixed receipts consistently");
-                Assert(Field<FlowLayoutPanel>(form, "actions").Controls.OfType<Button>().Any(b => b.Text == "Зачесть оплату"), "grey view retains allocation action");
+                Assert(CompactToolbarTests.CommandLabels(Field<FlowLayoutPanel>(form, "actions")).Contains("Зачесть оплату"), "grey view retains allocation action");
                 Field<CheckBox>(form, "archived").Checked = true; form.RefreshView();
                 Assert(Field<TableData>(form, "table").Ids.Contains(archivedGrey.Id), "archived grey receipts remain visible on request");
                 using (var allocationDialog = new AllocationDialog(store, external))

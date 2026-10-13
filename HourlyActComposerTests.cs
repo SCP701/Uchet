@@ -131,7 +131,7 @@ namespace WorkLedger
                     "new act is hidden by stale filters in the Acts tab");
                 Assert(grid.SelectedRows.Count == 1 && Convert.ToString(grid.SelectedRows[0].Tag) == saved.Id,
                     "newly saved act is not selected in the Acts tab");
-                Assert(PrivateField<FlowLayoutPanel>(form, "actions").Controls.OfType<Button>().Any(button => button.Text == "Акт в Excel"),
+                Assert(CompactToolbarTests.CommandLabels(PrivateField<FlowLayoutPanel>(form, "actions")).Contains("Акт в Excel"),
                     "Acts tab does not expose individual act export to Excel");
                 form.Navigate("create-act"); Application.DoEvents();
                 HourlyActComposer fresh = Descendants(form).OfType<HourlyActComposer>().Single();

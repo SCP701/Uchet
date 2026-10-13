@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -22,16 +22,29 @@ namespace WorkLedger
     {
         private static readonly CultureInfo Russian = CultureInfo.GetCultureInfo("ru-RU");
         private static readonly int[] Grid = { 353, 2948, 970, 1037, 904, 1245, 883, 849, 1138 };
-        public static void WriteHtml(string path, Store store, Record act)
+        public static List<ActHtmlLine> ReadDisplayRows(Record act, out string summary)
         {
-            var items = ActDocument.ReadItems(act); ActDocument.ValidateItems(act, items);
-            var rows = items.Select(x => new ActHtmlLine { Description = x.Description, Unit = x.Unit, Quantity = x.Quantity, Price = x.Price, Amount = x.Amount }).ToList();
-            string summary = "";
+            if (act == null || act.Kind != "act") throw new InvalidOperationException("Выберите акт выполненных работ.");
+            summary = "";
+            decimal total = Store.ParseMoney(act.Get("amount"));
+            if (total <= 0 || total > 1000000000000m) throw new InvalidOperationException("Укажите сумму акта больше нуля и не больше одного триллиона.");
             if (String.IsNullOrWhiteSpace(act.Get("workItems")) && String.IsNullOrWhiteSpace(act.Get(ActDocument.ItemsField)))
             {
                 List<ActHtmlLine> operations; string heading;
-                if (TryReadNumberedOperations(act.Get("description"), out operations, out heading)) { rows = operations; summary = heading; }
+                if (TryReadNumberedOperations(act.Get("description"), out operations, out heading))
+                {
+                    ValidateRows(operations, total); summary = heading; return operations;
+                }
             }
+            var items = ActDocument.ReadItems(act); ActDocument.ValidateItems(act, items);
+            var rows = items.Select(x => new ActHtmlLine { Description = x.Description, Unit = x.Unit, Quantity = x.Quantity, Price = x.Price, Amount = x.Amount }).ToList();
+            ValidateRows(rows, total);
+            return rows;
+        }
+        public static void WriteHtml(string path, Store store, Record act)
+        {
+            string summary;
+            var rows = ReadDisplayRows(act, out summary);
             WriteHtml(path, store, act, rows, summary);
         }
         public static void WriteHtml(string path, Store store, Record act, IEnumerable<ActHtmlLine> displayRows) { WriteHtml(path, store, act, displayRows, ""); }
