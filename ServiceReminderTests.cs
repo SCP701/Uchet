@@ -1,9 +1,13 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 using System.Windows.Forms;
 using System.Xml.Linq;
 namespace WorkLedger
@@ -48,6 +52,155 @@ namespace WorkLedger
             public void Dispose(){}
         }
         private static IEnumerable<Control> All(Control c){yield return c;foreach(Control child in c.Controls)foreach(var item in All(child))yield return item;}
+        [DllImport("user32.dll",CharSet=CharSet.Unicode,EntryPoint="SendMessageW")]
+        private static extern IntPtr SendPortText(IntPtr handle,uint message,IntPtr value,string text);
+        [DllImport("user32.dll",CharSet=CharSet.Unicode)]
+        private static extern IntPtr SendMessageW(IntPtr handle,uint message,IntPtr value,IntPtr data);
+        [DllImport("user32.dll")]
+        private static extern uint GetWindowThreadProcessId(IntPtr handle,out uint processId);
+        [DllImport("kernel32.dll")]
+        private static extern uint GetCurrentThreadId();
+        private delegate bool OwnWindowCallback(IntPtr window,IntPtr data);
+        [DllImport("user32.dll")]
+        private static extern bool EnumThreadWindows(uint thread,OwnWindowCallback callback,IntPtr data);
+        [DllImport("user32.dll",CharSet=CharSet.Unicode)]
+        private static extern int GetClassNameW(IntPtr window,StringBuilder name,int maximum);
+        [DllImport("user32.dll")]
+        private static extern bool EndDialog(IntPtr dialog,IntPtr result);
+        private static void PumpUntil(Func<bool> ready)
+        {
+            var clock=System.Diagnostics.Stopwatch.StartNew();
+            while(!ready()&&clock.ElapsedMilliseconds<5000){Application.DoEvents();Thread.Sleep(5);}
+            if(!ready())throw new InvalidOperationException("Service mail UI operation did not finish.");
+        }
+        internal static void BusyInputChecks(string root)
+        {
+            var fixture=new Fixture(root,"busy-input");
+            byte[] originalLedger=File.ReadAllBytes(fixture.Store.DataPath),originalSettings=File.ReadAllBytes(ServiceMailSettings.SettingsPath(fixture.Dir));
+            using(var window=new ServiceReminderWindow(fixture.Store,null))
+            using(var entered=new ManualResetEvent(false))using(var release=new ManualResetEvent(false))
+            using(var dismiss=new System.Windows.Forms.Timer{Interval=30}) {
+                uint thread=GetCurrentThreadId();
+                // Close only this test's native result dialogs; no desktop-wide or global input.
+                dismiss.Tick+=delegate{EnumThreadWindows(thread,delegate(IntPtr dialog,IntPtr data){
+                    uint processId;GetWindowThreadProcessId(dialog,out processId);var name=new StringBuilder(64);GetClassNameW(dialog,name,name.Capacity);
+                    if(processId==(uint)System.Diagnostics.Process.GetCurrentProcess().Id&&name.ToString()=="#32770")EndDialog(dialog,(IntPtr)DialogResult.OK);
+                    return true;
+                },IntPtr.Zero);};dismiss.Start();
+                window.ShowInTaskbar=false;window.Opacity=0;window.Show();
+                ((TabControl)typeof(ServiceReminderWindow).GetField("tabs",BindingFlags.NonPublic|BindingFlags.Instance).GetValue(window)).SelectedIndex=1;
+                // This secondary guard prevents any real connection even if the busy-button regression returns.
+                ((TextBox)typeof(ServiceReminderWindow).GetField("host",BindingFlags.NonPublic|BindingFlags.Instance).GetValue(window)).Text="";
+                var test=All(window).OfType<Button>().Single(b=>b.Text=="Отправить тестовое письмо себе");
+                var save=(Button)typeof(ServiceReminderWindow).GetField("save",BindingFlags.NonPublic|BindingFlags.Instance).GetValue(window);
+                var send=(Button)typeof(ServiceReminderWindow).GetField("send",BindingFlags.NonPublic|BindingFlags.Instance).GetValue(window);
+                var run=typeof(ServiceReminderWindow).GetMethod("RunAsync",BindingFlags.NonPublic|BindingFlags.Instance);
+                int started=0,extra=0,buttonClicks=0;test.Click+=delegate{buttonClicks++;};
+                try {
+                    run.Invoke(window,new object[]{new Func<string>(delegate{Interlocked.Increment(ref started);entered.Set();release.WaitOne(5000);return "Synthetic transport accepted.";})});
+                    PumpUntil(()=>entered.WaitOne(0));
+                    Check(started==1&&!save.Enabled&&!send.Enabled&&!test.Enabled,"all mail action buttons are disabled while a synthetic transport is pending");
+                    typeof(ServiceReminderWindow).GetMethod("RefreshLists",BindingFlags.NonPublic|BindingFlags.Instance).Invoke(window,null);
+                    Check(!save.Enabled&&!send.Enabled&&!test.Enabled,"refresh does not reenable sending while the existing operation is pending");
+                    uint processId;GetWindowThreadProcessId(test.Handle,out processId);Check(processId==(uint)System.Diagnostics.Process.GetCurrentProcess().Id,"busy button clicks target this test process only");
+                    SendMessageW(test.Handle,0x00F5,IntPtr.Zero,IntPtr.Zero);SendMessageW(test.Handle,0x00F5,IntPtr.Zero,IntPtr.Zero);Application.DoEvents();
+                    run.Invoke(window,new object[]{new Func<string>(delegate{Interlocked.Increment(ref extra);return "Must not start.";})});
+                    Application.DoEvents();Thread.Sleep(30);
+                    Check(buttonClicks==0&&extra==0,"repeated native test-mail clicks and a repeated queue entry do not start another send");
+                }finally{release.Set();}
+                PumpUntil(()=>save.Enabled&&send.Enabled&&test.Enabled);
+                Check(started==1,"successful synthetic transport restores all action buttons once");
+                run.Invoke(window,new object[]{new Func<string>(delegate{throw new IOException("Synthetic transport failed without a connection.");})});
+                PumpUntil(()=>save.Enabled&&send.Enabled&&test.Enabled);
+                Check(save.Enabled&&send.Enabled&&test.Enabled,"failed synthetic transport releases the busy guard and restores all action buttons");
+                int recovered=0;run.Invoke(window,new object[]{new Func<string>(delegate{Interlocked.Increment(ref recovered);return "Recovered.";})});
+                PumpUntil(()=>recovered==1&&save.Enabled&&send.Enabled&&test.Enabled);
+                Check(recovered==1,"a new operation can start after a failed transport");dismiss.Stop();window.Close();
+            }
+            Check(originalLedger.SequenceEqual(File.ReadAllBytes(fixture.Store.DataPath))&&originalSettings.SequenceEqual(File.ReadAllBytes(ServiceMailSettings.SettingsPath(fixture.Dir))),"busy click and failed transport checks preserve ledger and mail settings without networking or task registration");
+        }
+        internal static void PortInputChecks(string root)
+        {
+            var fixture=new Fixture(root,"port-input");
+            byte[] originalLedger=File.ReadAllBytes(fixture.Store.DataPath),originalSettings=File.ReadAllBytes(ServiceMailSettings.SettingsPath(fixture.Dir));
+            CultureInfo originalCulture=System.Threading.Thread.CurrentThread.CurrentCulture;
+            try {
+                foreach(string culture in new[]{"ru-RU","en-US"}) {
+                    System.Threading.Thread.CurrentThread.CurrentCulture=CultureInfo.GetCultureInfo(culture);
+                    using(var window=new ServiceReminderWindow(fixture.Store,null)) {
+                        window.ShowInTaskbar=false;window.Opacity=0;window.Show();
+                        ((TabControl)typeof(ServiceReminderWindow).GetField("tabs",BindingFlags.NonPublic|BindingFlags.Instance).GetValue(window)).SelectedIndex=1;
+                        Application.DoEvents();
+                        var port=(Control)typeof(ServiceReminderWindow).GetField("port",BindingFlags.NonPublic|BindingFlags.Instance).GetValue(window);
+                        var edit=port as TextBoxBase??port.Controls.OfType<TextBoxBase>().First();
+                        uint processId;GetWindowThreadProcessId(edit.Handle,out processId);
+                        Check(processId==(uint)System.Diagnostics.Process.GetCurrentProcess().Id,"port input targets only this test process; "+culture);
+                        var draft=typeof(ServiceReminderWindow).GetMethod("Draft",BindingFlags.NonPublic|BindingFlags.Instance);
+                        foreach(string invalid in new[]{""," ","0","-1","+587","65536","1,5","1.5","40.50","1 000","1e3","٥٨٧",new String('9',1000)}) {
+                            SendPortText(edit.Handle,0x000C,IntPtr.Zero,"");
+                            if(invalid.Length<=30)foreach(char character in invalid)SendMessageW(edit.Handle,0x0102,(IntPtr)character,(IntPtr)1);
+                            else SendPortText(edit.Handle,0x000C,IntPtr.Zero,invalid);
+                            Application.DoEvents();bool rejected=false;
+                            try{draft.Invoke(window,null);}catch(TargetInvocationException error){rejected=error.InnerException is InvalidOperationException&&error.InnerException.Message.Contains("порт");}
+                            Check(rejected&&edit.Text==invalid,"raw invalid SMTP port rejected without stale value clamping or truncation; "+culture+" chars="+invalid.Length);
+                        }
+                        foreach(var valid in new[]{new{Raw="1",Port=1},new{Raw="587",Port=587},new{Raw="65535",Port=65535},new{Raw=" 2525 ",Port=2525},new{Raw="000587",Port=587}}) {
+                            SendPortText(edit.Handle,0x000C,IntPtr.Zero,valid.Raw);Application.DoEvents();
+                            var settings=(ServiceMailSettings)draft.Invoke(window,null);
+                            Check(settings.Port==valid.Port,"integer SMTP port boundaries and correction are exact; "+culture+" raw="+valid.Raw);
+                        }
+                        window.Close();
+                    }
+                }
+            }finally{System.Threading.Thread.CurrentThread.CurrentCulture=originalCulture;}
+            Check(originalLedger.SequenceEqual(File.ReadAllBytes(fixture.Store.DataPath))&&originalSettings.SequenceEqual(File.ReadAllBytes(ServiceMailSettings.SettingsPath(fixture.Dir))),"port input and draft validation preserve saved mail settings and ledger without sending or scheduling");
+        }
+        private static Record Reference(Store store,Record party,string key,string suffix)
+        {
+            return key=="contractId"
+                ?Add(store,"contract","number","CONTRACT-"+suffix,"date","2026-09-01","partyId",party.Id,"amount","1000.00","currency","BYN","direction","income","status","active")
+                :Add(store,"project","name","Project "+suffix,"partyId",party.Id,"status","active");
+        }
+        internal static void ReferenceCompatibilityChecks(string root)
+        {
+            foreach(string key in new[]{"contractId","projectId"})
+            {
+                string prefix=key=="contractId"?"c":"p";
+                foreach(bool advance in new[]{false,true})
+                {
+                    var f=new Fixture(root,prefix+"bad"+(advance?"a":"n"));
+                    var first=Reference(f.Store,f.Party,key,"A");var other=Reference(f.Store,f.Party,key,"B");
+                    f.Act.Set(key,first.Id);f.Act.Set("status","signed");f.Store.Upsert(f.Act);
+                    var payment=f.Payment(120m,"");payment.Set(key,other.Id);
+                    payment.Set("bankPurpose","Оплата по акту № "+f.Act.Get("number"));
+                    if(advance)payment.Set("date","2026-09-30");f.Store.Upsert(payment);
+                    byte[] before=File.ReadAllBytes(f.Store.DataPath);long revision=f.Store.Revision;
+                    var balance=f.Balance();
+                    Check(balance.Paid==0&&balance.Due==120m&&balance.NeedsReview,"explicit "+key+" conflict requires review without settling act; advance="+advance);
+                    var plan=ServiceReminderRuntime.Plans(f.Store.Records,f.Settings,new ServiceMailHistory(),Now(11)).Single();
+                    Check(plan.Status=="Проверить привязку оплаты","conflicting purpose stops reminder as review rather than paid; "+key+" advance="+advance);
+                    Check(f.Store.ActDue(f.Act.Id)==120m&&f.Store.PaymentUnallocated(payment.Id)==120m&&QuarterlyTaxes.CalculateAllTime(f.Store,"BYN").Receipts==120m,"conflict preserves actual debt unallocated funds and tax receipts; "+key+" advance="+advance);
+                    bool rejected=false;try{f.Store.Allocate(payment.Id,f.Act.Id,120m);}catch(InvalidOperationException){rejected=true;}
+                    Check(rejected&&revision==f.Store.Revision&&before.SequenceEqual(File.ReadAllBytes(f.Store.DataPath)),"allocation rejects same conflicting references atomically; "+key+" advance="+advance);
+                }
+                for(int scenario=0;scenario<3;scenario++)
+                {
+                    var f=new Fixture(root,prefix+"ok"+scenario);var reference=Reference(f.Store,f.Party,key,"MATCH");
+                    if(scenario!=1){f.Act.Set(key,reference.Id);f.Store.Upsert(f.Act);}
+                    var payment=f.Payment(120m,"","Оплата по акту № "+f.Act.Get("number"));
+                    if(scenario!=0){payment.Set(key,reference.Id);f.Store.Upsert(payment);}
+                    var balance=f.Balance();
+                    Check(balance.Paid==120m&&balance.Due==0&&!balance.NeedsReview,"purpose accepts matching references and either empty side; "+key+" scenario="+scenario);
+                }
+                {
+                    var f=new Fixture(root,prefix+"other");var first=Reference(f.Store,f.Party,key,"A");var other=Reference(f.Store,f.Party,key,"B");
+                    f.Act.Set(key,first.Id);f.Store.Upsert(f.Act);
+                    var payment=f.Payment(120m,"","Оплата другого договора без номера акта");payment.Set(key,other.Id);f.Store.Upsert(payment);
+                    var balance=f.Balance();
+                    Check(balance.Due==120m&&balance.Paid==0&&!balance.NeedsReview,"known unrelated "+key+" does not block this act without its explicit number");
+                }
+            }
+        }
         private static void TransportChecks(string root)
         {
             var listener=new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback,0);listener.Start();
@@ -114,6 +267,9 @@ namespace WorkLedger
             f=new Fixture(root,"bank-purpose-field");payment=f.Payment(120m,"","Импорт из банковской выписки");
             payment.Set("bankPurpose","Оплата обслуживания по акту № "+f.Act.Get("number"));f.Store.Upsert(payment);
             Check(f.Balance().Due==0&&f.Balance().Status=="Оплачен","bank purpose from reconciliation package settles exact service act");
+            ReferenceCompatibilityChecks(Path.Combine(root,"refs"));
+            PortInputChecks(Path.Combine(root,"port-validation"));
+            BusyInputChecks(Path.Combine(root,"busy-validation"));
             Check(!ServiceReminderLedger.PurposeMatches("Оплата по акту № 5000","500")&&!ServiceReminderLedger.PurposeMatches("платёж 500","500")&&!ServiceReminderLedger.PurposeMatches("по акту №500/1","500")&&!ServiceReminderLedger.PurposeMatches("по акту №500.1","500"),"neighboring number and bare amount never match");
             f=new Fixture(root,"unmatched");f.Payment(120m,"","Оплата услуг");sender=new Sender();
             Check(f.Balance().NeedsReview&&ServiceReminderRuntime.Process(f.Dir,Now(11),sender)==0,"unassigned bank receipt pauses mail for reconciliation");

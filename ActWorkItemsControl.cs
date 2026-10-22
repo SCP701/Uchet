@@ -196,8 +196,7 @@ namespace WorkLedger
         }
         private static bool Number(object value, out decimal number)
         {
-            string text = Convert.ToString(value).Trim().Replace(" ", "").Replace("\u00a0", "").Replace("\u202f", "").Replace(',', '.');
-            return Decimal.TryParse(text, NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out number);
+            return NumericText.TryParse(Convert.ToString(value), NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint, out number);
         }
         private void ApplyMode()
         {

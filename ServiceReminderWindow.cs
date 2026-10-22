@@ -22,10 +22,13 @@ namespace WorkLedger
         private readonly CheckBox tls=new CheckBox{Text="Защищённое соединение (STARTTLS)",AutoSize=true};
         private readonly DateTimePicker start=new DateTimePicker{Format=DateTimePickerFormat.Custom,CustomFormat="MMMM yyyy",ShowUpDown=true};
         private readonly TextBox host=new TextBox(),login=new TextBox(),address=new TextBox(),senderName=new TextBox(),password=new TextBox{UseSystemPasswordChar=true};
-        private readonly NumericUpDown port=new NumericUpDown{Minimum=1,Maximum=65535,Value=587};
+        private readonly TextBox port=new TextBox{Text="587",Name="smtpPort",AccessibleName="Целый порт от 1 до 65535"};
+        private readonly ToolTip portHint=new ToolTip();
         private readonly TextBox subject=new TextBox(),body=new TextBox{Multiline=true,ScrollBars=ScrollBars.Vertical};
         private readonly Button save=new UiButton{Text="Сохранить",AutoSize=true,Primary=true};
         private readonly Button send=new UiButton{Text="Проверить и отправить",AutoSize=true};
+        private readonly Button sendTest=new UiButton{Text="Отправить тестовое письмо себе",AutoSize=true,MinimumSize=new Size(0,34),Padding=new Padding(9,0,9,0),Margin=new Padding(0,0,7,0)};
+        private bool mailBusy;
         private List<ServiceMailPlan> plans=new List<ServiceMailPlan>();
         public ServiceReminderWindow(Store store,Action<string> navigate)
         {
@@ -57,7 +60,8 @@ namespace WorkLedger
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute,210));layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));
             var scroll=new Panel{Dock=DockStyle.Fill,AutoScroll=true};scroll.Controls.Add(layout);mailPage.Controls.Add(scroll);
             AddRow(layout,"Рассылка",enabled,38);AddRow(layout,"Первый месяц",start,38);
-            AddRow(layout,"Сервер исходящей почты",host,38);AddRow(layout,"Порт",port,38);AddRow(layout,"Соединение",tls,38);
+            AddRow(layout,"Сервер исходящей почты",host,38);AddRow(layout,"Порт (1–65535)",port,38);AddRow(layout,"Соединение",tls,38);
+            portHint.SetToolTip(port,"Целый порт от 1 до 65535.");
             AddRow(layout,"Email отправителя",address,38);AddRow(layout,"Имя отправителя",senderName,38);
             AddRow(layout,"Логин почты",login,38);AddRow(layout,"Пароль приложения",password,38);
             mailInfo.AutoSize=true;mailInfo.MaximumSize=new Size(710,0);mailInfo.ForeColor=UiStyle.Muted;
@@ -65,11 +69,11 @@ namespace WorkLedger
             var fields=new Label{AutoSize=true,MaximumSize=new Size(720,0),ForeColor=UiStyle.Muted,
                 Text="Поля: {контрагент}, {номер}, {дата}, {период}, {сумма}, {оплачено}, {остаток}, {валюта}, {организация}, {реквизиты}.\r\nОбычно используется порт 587 и пароль приложения вашей почты. Компьютер должен быть включён; без интернета отправка не выполняется."};
             AddRow(layout,"",fields,85);
-            var test=MakeButton("Отправить тестовое письмо себе",SendTest);AddRow(layout,"Проверка почты",test,40);
+            sendTest.Click+=delegate{SendTest();};AddRow(layout,"Проверка почты",sendTest,40);
             var footer=Strip();footer.Dock=DockStyle.Bottom;footer.Height=50;footer.FlowDirection=FlowDirection.RightToLeft;
             var close=MakeButton("Закрыть",Close);footer.Controls.Add(close);footer.Controls.Add(save);Controls.Add(footer);
             save.Click+=delegate{SaveSettings();};
-            enabled.Checked=settings.Enabled;host.Text=settings.Host;port.Value=settings.Port;tls.Checked=settings.Tls;
+            enabled.Checked=settings.Enabled;host.Text=settings.Host;port.Text=settings.Port.ToString(CultureInfo.InvariantCulture);tls.Checked=settings.Tls;
             login.Text=settings.Login;address.Text=settings.FromAddress;senderName.Text=settings.FromName;subject.Text=settings.Subject;body.Text=settings.Body;
             start.Value=DateTime.ParseExact(settings.StartMonth+"-01","yyyy-MM-dd",CultureInfo.InvariantCulture);
             Record own=store.Of("settings").FirstOrDefault();
@@ -100,9 +104,16 @@ namespace WorkLedger
             table.Controls.Add(new Label{Text=text,AutoSize=true,Margin=new Padding(0,7,8,0)},0,row);
             control.Dock=DockStyle.Fill;control.Margin=new Padding(0,3,0,4);table.Controls.Add(control,1,row);
         }
+        internal static int ParsePort(string raw)
+        {
+            string value=(raw??"").Trim();int parsed;
+            if(value.Length==0||value.Any(c=>c<'0'||c>'9')||!Int32.TryParse(value,NumberStyles.None,CultureInfo.InvariantCulture,out parsed)||parsed<1||parsed>65535)
+                throw new InvalidOperationException("Укажите целый порт от 1 до 65535.");
+            return parsed;
+        }
         private ServiceMailSettings Draft()
         {
-            return new ServiceMailSettings{Enabled=enabled.Checked,StartMonth=start.Value.ToString("yyyy-MM"),Host=host.Text.Trim(),Port=(int)port.Value,Tls=tls.Checked,
+            return new ServiceMailSettings{Enabled=enabled.Checked,StartMonth=start.Value.ToString("yyyy-MM"),Host=host.Text.Trim(),Port=ParsePort(port.Text),Tls=tls.Checked,
                 Login=login.Text.Trim(),FromAddress=address.Text.Trim(),FromName=senderName.Text.Trim(),ProtectedPassword=settings.ProtectedPassword,Subject=subject.Text,Body=body.Text};
         }
         private void SaveSettings()
@@ -136,7 +147,7 @@ namespace WorkLedger
                 summary.Text=(settings.Enabled?"Автоматическая рассылка включена.":"Автоматическая рассылка выключена.")+
                     "\r\nПервое письмо — через 7 дней после акта; второе — через 3 дня после первого, если остаётся неоплаченная сумма. Всего два письма."+
                     "\r\nОплаты учитываются по выписке и ручному подтверждению. Спорную банковскую оплату можно привязать к акту.";
-                var selected=SelectedPlan();confirmPayment.Enabled=selected!=null&&selected.Balance.Due>0;send.Enabled=true;
+                var selected=SelectedPlan();confirmPayment.Enabled=selected!=null&&selected.Balance.Due>0;send.Enabled=!mailBusy;
             }catch(Exception e){summary.Text=e.Message;send.Enabled=false;confirmPayment.Enabled=false;}
         }
         private static string DateText(string text){return ServiceReminderLedger.Date(text).ToString("dd.MM.yyyy");}
@@ -190,11 +201,18 @@ namespace WorkLedger
         }
         private void RunAsync(Func<string> action)
         {
-            save.Enabled=false;send.Enabled=false;
+            if(mailBusy)return;
+            mailBusy=true;save.Enabled=false;send.Enabled=false;sendTest.Enabled=false;
             ThreadPool.QueueUserWorkItem(delegate {
                 string message;
                 try{message=action();}catch{message="Отправка не подтверждена. Проверьте настройки почты и соединение.";}
-                try{if(!IsDisposed&&IsHandleCreated)BeginInvoke((Action)delegate{save.Enabled=true;send.Enabled=true;RefreshLists();MessageBox.Show(this,message,"Рассылка обслуживания");});}catch(InvalidOperationException){}
+                try {
+                    if(!IsDisposed&&IsHandleCreated)BeginInvoke((Action)delegate {
+                        try{if(!IsDisposed){RefreshLists();MessageBox.Show(this,message,"Рассылка обслуживания");}}
+                        finally{mailBusy=false;if(!IsDisposed){save.Enabled=true;sendTest.Enabled=true;RefreshLists();}}
+                    });
+                    else mailBusy=false;
+                }catch(InvalidOperationException){mailBusy=false;}
             });
         }
         private void ShowText(string caption,string text)
@@ -206,7 +224,7 @@ namespace WorkLedger
         protected override void Dispose(bool disposing)
         {
             base.Dispose(disposing);
-            if(disposing&&applicationIcon!=null)applicationIcon.Dispose();
+            if(disposing){portHint.Dispose();if(applicationIcon!=null)applicationIcon.Dispose();}
         }
         private void Warn(string text){MessageBox.Show(this,text,"Рассылка обслуживания",MessageBoxButtons.OK,MessageBoxIcon.Information);}
     }

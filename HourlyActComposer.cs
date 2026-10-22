@@ -210,14 +210,12 @@ namespace WorkLedger
         }
         private static bool TryHours(object value, out decimal hours)
         {
-            string text = Convert.ToString(value).Trim().Replace(" ", "").Replace("\u00a0", "").Replace("\u202f", "").Replace(',', '.');
-            return Decimal.TryParse(text, NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out hours) && hours > 0
+            return NumericText.TryParse(Convert.ToString(value), NumberStyles.AllowDecimalPoint, out hours) && hours > 0
                 && hours <= 1000000000000m && Decimal.Round(hours, 6) == hours;
         }
         private static bool TryRate(object value, out decimal price)
         {
-            string text = Convert.ToString(value).Trim().Replace(" ", "").Replace("\u00a0", "").Replace("\u202f", "").Replace(',', '.');
-            return Decimal.TryParse(text, NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out price)
+            return NumericText.TryParse(Convert.ToString(value), NumberStyles.AllowDecimalPoint, out price)
                 && price > 0 && price <= 1000000000000m && Decimal.Round(price, 2) == price;
         }
         private void DetachEditor()

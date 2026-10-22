@@ -868,16 +868,19 @@ namespace WorkLedger
         }
         private static byte[] Serialize(LedgerDocument d)
         {
-            JavaScriptSerializer serializer = new JavaScriptSerializer { MaxJsonLength = 32000000, RecursionLimit = 100 };
-            return new UTF8Encoding(false, true).GetBytes(serializer.Serialize(d));
+            JavaScriptSerializer serializer = new JavaScriptSerializer { MaxJsonLength = LedgerFormatLimits.MaxDocumentCharacters, RecursionLimit = 100 };
+            string json = serializer.Serialize(d);
+            UTF8Encoding utf8 = new UTF8Encoding(false, true);
+            if (utf8.GetByteCount(json) > LedgerFormatLimits.MaxDocumentBytes) throw new InvalidOperationException("База превышает допустимый размер.");
+            return utf8.GetBytes(json);
         }
         private static LedgerDocument ReadDocument(byte[] bytes)
         {
             try
             {
-                if (bytes.Length > 32000000) throw new InvalidOperationException("База превышает допустимый размер.");
+                if (bytes.Length > LedgerFormatLimits.MaxDocumentBytes) throw new InvalidOperationException("База превышает допустимый размер.");
                 string json = new UTF8Encoding(false, true).GetString(bytes).TrimStart('\uFEFF');
-                JavaScriptSerializer serializer = new JavaScriptSerializer { MaxJsonLength = 32000000, RecursionLimit = 100 };
+                JavaScriptSerializer serializer = new JavaScriptSerializer { MaxJsonLength = LedgerFormatLimits.MaxDocumentCharacters, RecursionLimit = 100 };
                 LedgerDocument d = serializer.Deserialize<LedgerDocument>(json);
                 if (d == null || d.Version != 1 || d.Revision < 0 || d.Records == null || d.Audit == null || d.Audit.Any(a => a == null)) throw new InvalidOperationException("Неизвестный или повреждённый формат базы.");
                 Validate(d.Records); return d;

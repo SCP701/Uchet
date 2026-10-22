@@ -2,6 +2,7 @@
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Security.Cryptography;
 
 namespace WorkLedger
 {
@@ -23,6 +24,45 @@ namespace WorkLedger
                 long rev = s.Revision; Record copy = s.Find(p.Id); copy.Set("name", "Changed only in copy"); Eq(s.Find(p.Id).Get("name"), "Customer");
                 s.Upsert(copy); Eq(s.Revision, rev + 1); Store loaded = new Store(s.DataDir); Eq(loaded.Find(p.Id).Get("name"), "Changed only in copy");
                 Eq(loaded.Audit.Count, 2); True(File.Exists(s.DataPath + ".bak")); True(loaded.Audit.Last().Before.Contains("Customer"));
+            });
+            Test("Cyrillic imports larger than 32 MB remain readable with identical data and audit", delegate {
+                Store s = Fresh(root, "large-utf8");
+                string notes = new String('Я', 43000);
+                Record[] incoming = Enumerable.Range(0, 200).Select(i => R("party", "name", "Проверка " + i, "role", "client", "notes", notes)).ToArray();
+                s.ImportBatch(incoming);
+                long savedBytes = new FileInfo(s.DataPath).Length; True(savedBytes > 32000000);
+                string savedHash = FileHash(s.DataPath);
+                Store loaded = new Store(s.DataDir);
+                Eq(loaded.Revision, s.Revision); Eq(loaded.Records.Count, incoming.Length);
+                foreach (Record expected in s.Records)
+                {
+                    Record actual = loaded.Find(expected.Id); True(actual != null); Eq(actual.Kind, expected.Kind); Eq(actual.Fields.Count, expected.Fields.Count);
+                    foreach (var field in expected.Fields) Eq(actual.Get(field.Key), field.Value);
+                }
+                EqualAudit(s.Audit.ToArray(), loaded.Audit.ToArray());
+                Eq(FileHash(s.DataPath), savedHash);
+                Console.WriteLine("Large UTF-8 ledger reloaded without changes: " + savedBytes + " bytes, " + loaded.Records.Count + " records, " + loaded.Audit.Count + " audit entries.");
+            });
+            Test("Oversized escaped JSON import preserves ledger backup revision records and audit", delegate {
+                Store s = Fresh(root, "document-size-rollback"); Record party = Party(s, "Original");
+                Record edit = s.Find(party.Id); edit.Set("name", "Current"); s.Upsert(edit);
+                byte[] ledger = File.ReadAllBytes(s.DataPath), backup = File.ReadAllBytes(s.DataPath + ".bak");
+                long revision = s.Revision; AuditEntry[] audit = s.Audit.ToArray();
+                // JSON escapes each control character as six ASCII characters, in the record and its audit entry.
+                string notes = new String('\u0001', 90000);
+                Record[] oversized = Enumerable.Range(0, 30).Select(i => R("party", "name", "Must not persist " + i, "role", "client", "notes", notes)).ToArray();
+                Store control = Fresh(root, "document-size-control"); control.ImportBatch(new[] { oversized[0] });
+                Eq(new Store(control.DataDir).Find(oversized[0].Id).Get("notes"), notes);
+                InvalidOperationException rejected = null;
+                try { s.ImportBatch(oversized); } catch (InvalidOperationException error) { rejected = error; }
+                True(rejected != null);
+                Eq(s.Revision, revision); Eq(s.Records.Count, 1); Eq(s.Find(party.Id).Get("name"), "Current"); True(s.Find(oversized[0].Id) == null);
+                EqualAudit(audit, s.Audit.ToArray());
+                True(ledger.SequenceEqual(File.ReadAllBytes(s.DataPath))); True(backup.SequenceEqual(File.ReadAllBytes(s.DataPath + ".bak")));
+                Eq(Directory.GetFiles(s.DataDir, ".ledger-*.tmp").Length, 0);
+                Store loaded = new Store(s.DataDir); Eq(loaded.Revision, revision); Eq(loaded.Records.Count, 1); Eq(loaded.Find(party.Id).Get("name"), "Current");
+                EqualAudit(audit, loaded.Audit.ToArray());
+                Console.WriteLine("Oversized escaped JSON rejected before commit: " + rejected.GetType().FullName + Environment.NewLine + rejected.StackTrace);
             });
             Test("One payment pays several signed acts, one act receives several payments", delegate {
                 Store s = Fresh(root, "multi"); Record party = Party(s, "Multi"); Record a = Act(s, party, "A1", 100m, "signed"); Record b = Act(s, party, "A2", 80m, "signed"); Record p = Payment(s, party, 120m);
@@ -211,6 +251,17 @@ namespace WorkLedger
             catch (Exception e) { failures++; Console.WriteLine("FAIL " + name + ": " + e); }
         }
         private static void True(bool value) { if (!value) throw new Exception("Assertion failed."); }
+        private static string FileHash(string path) { using (var input = File.OpenRead(path)) using (var hash = SHA256.Create()) return Convert.ToBase64String(hash.ComputeHash(input)); }
+        private static void EqualAudit(AuditEntry[] expected, AuditEntry[] actual)
+        {
+            Eq(actual.Length, expected.Length);
+            for (int i = 0; i < expected.Length; i++)
+            {
+                Eq(actual[i].Id, expected[i].Id); Eq(actual[i].Date, expected[i].Date); Eq(actual[i].Action, expected[i].Action); Eq(actual[i].User, expected[i].User);
+                Eq(actual[i].Kind, expected[i].Kind); Eq(actual[i].RecordId, expected[i].RecordId); Eq(actual[i].Summary, expected[i].Summary);
+                Eq(actual[i].Before, expected[i].Before); Eq(actual[i].After, expected[i].After);
+            }
+        }
         private static void Eq<T>(T actual, T expected) { if (!Object.Equals(actual, expected)) throw new Exception("Expected " + expected + ", got " + actual); }
         private static void Reject(Action operation) { try { operation(); } catch { return; } throw new Exception("Expected rejection, operation succeeded."); }
         private static Store Fresh(string root, string name) { return new Store(Path.Combine(root, name)); }

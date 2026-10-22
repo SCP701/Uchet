@@ -111,8 +111,8 @@ namespace WorkLedger
         public static void ValidateDataVersion(UpdateManifest manifest, string ledgerPath)
         {
             Authenticated(manifest);
-            byte[] bytes = ReadBounded(ledgerPath, 32 * 1024 * 1024);
-            var obj = Decode<Dictionary<string, object>>(bytes, 32 * 1024 * 1024); object value; int version;
+            byte[] bytes = ReadBounded(ledgerPath, LedgerFormatLimits.MaxDocumentBytes);
+            var obj = Decode<Dictionary<string, object>>(bytes, LedgerFormatLimits.MaxDocumentCharacters); object value; int version;
             if (obj == null || !obj.TryGetValue("Version", out value) || !Int32.TryParse(Convert.ToString(value, CultureInfo.InvariantCulture), NumberStyles.None, CultureInfo.InvariantCulture, out version) || version < manifest.MinDataVersion || version > manifest.MaxDataVersion) throw new InvalidOperationException("Эта версия обновления несовместима с вашей базой. Данные сохранены.");
         }
         public static void CheckManifestDataVersion(UpdateManifest manifest, string ledgerPath) { ValidateDataVersion(manifest, ledgerPath); }

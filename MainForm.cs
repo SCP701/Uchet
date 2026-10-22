@@ -1528,6 +1528,7 @@ namespace WorkLedger
             var label2 = new Label { Text = "Подписанный акт того же контрагента, направления и валюты", Left = 20, Top = 90, Width = 610 };
             acts.SetBounds(20, 118, 600, 30); acts.DropDownStyle = ComboBoxStyle.DropDownList;
             amount.SetBounds(20, 182, 185, 30);
+            amount.MaxLength = 100;
             help.SetBounds(220, 179, 400, 50); help.AutoSize = false;
             var label3 = new Label { Text = "Сумма зачёта", Left = 20, Top = 155, Width = 180 };
             history.SetBounds(20, 251, 600, 100); history.HorizontalScrollbar = true;
@@ -1546,7 +1547,7 @@ namespace WorkLedger
                 try
                 {
                     if (payments.SelectedItem == null || acts.SelectedItem == null) throw new InvalidOperationException("Выберите платёж и акт.");
-                    store.Allocate(((Choice)payments.SelectedItem).Id, ((Choice)acts.SelectedItem).Id, Store.ParseMoney(amount.Text)); DialogResult = DialogResult.OK; Close();
+                    store.Allocate(((Choice)payments.SelectedItem).Id, ((Choice)acts.SelectedItem).Id, EnteredAmount(amount.Text)); DialogResult = DialogResult.OK; Close();
                 }
                 catch (Exception ex) { MessageBox.Show(this, ex.Message, "Зачёт оплаты", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
             };
@@ -1557,6 +1558,15 @@ namespace WorkLedger
                 for (int i = 0; i < payments.Items.Count; i++) { var p = store.Find(((Choice)payments.Items[i]).Id); if (p.Get("partyId") == initial.Get("partyId") && p.Get("currency") == initial.Get("currency") && p.Get("direction") == initial.Get("direction") && store.PaymentUnallocated(p.Id) > 0 && Compatible(p, initial)) { payments.SelectedIndex = i; break; } }
                 Select(acts, initial.Id);
             }
+        }
+        private static decimal EnteredAmount(string rawText)
+        {
+            string text = rawText.Trim().Replace(',', '.'); decimal value;
+            int separator = text.IndexOf('.');
+            if (!Decimal.TryParse(text, NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out value)
+                || value <= 0m || separator >= 0 && text.Length - separator - 1 > 2)
+                throw new InvalidOperationException("Укажите сумму зачёта больше нуля с точностью до копеек. Можно использовать запятую или точку.");
+            return value;
         }
         private static void Select(ComboBox box, string id) { for (int i = 0; i < box.Items.Count; i++) if (((Choice)box.Items[i]).Id == id) { box.SelectedIndex = i; break; } }
         private void FillActs(Record initial)

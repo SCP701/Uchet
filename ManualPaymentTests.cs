@@ -1,9 +1,11 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Windows.Forms;
@@ -53,6 +55,136 @@ namespace WorkLedger
         }
         private static IEnumerable<Control> All(Control c){yield return c;foreach(Control child in c.Controls)foreach(Control item in All(child))yield return item;}
         private static T Field<T>(object target,string name){return (T)target.GetType().GetField(name,BindingFlags.NonPublic|BindingFlags.Instance).GetValue(target);}
+        [DllImport("user32.dll",CharSet=CharSet.Unicode)] private static extern IntPtr SendMessage(IntPtr window,int message,IntPtr wParam,IntPtr lParam);
+        [DllImport("user32.dll")] private static extern bool PostMessage(IntPtr window,int message,IntPtr wParam,IntPtr lParam);
+        private static void PressOwnKey(Control input,Keys key)
+        {
+            PostMessage(input.Handle,0x0100,new IntPtr((int)key),new IntPtr(1));PostMessage(input.Handle,0x0101,new IntPtr((int)key),new IntPtr(unchecked((int)0xC0000001)));Application.DoEvents();
+        }
+        private static void EnterAmount(ManualPaymentDialog dialog,string text)
+        {
+            var input=Field<TextBox>(dialog,"amount");input.Focus();
+            SendMessage(input.Handle,0x00B1,IntPtr.Zero,new IntPtr(-1));SendMessage(input.Handle,0x0102,new IntPtr(8),IntPtr.Zero);
+            foreach(char character in text)SendMessage(input.Handle,0x0102,new IntPtr(character),IntPtr.Zero);
+            PressOwnKey(input,Keys.Tab);
+        }
+        private static void ClickConfirmation(ManualPaymentDialog dialog)
+        {
+            var button=Field<Button>(dialog,"confirm");SendMessage(button.Handle,0x00F5,IntPtr.Zero,IntPtr.Zero);Application.DoEvents();
+        }
+        internal static void AmountInputChecks(string root)
+        {
+            CultureInfo previous=Thread.CurrentThread.CurrentCulture;
+            try
+            {
+                foreach(string culture in new[]{"ru-RU","en-US","be-BY"})
+                {
+                    Thread.CurrentThread.CurrentCulture=CultureInfo.GetCultureInfo(culture);
+                    var invalid=new Fixture(root,"invalid-"+culture,false,true);var act=invalid.Store.Find(invalid.Act.Id);act.Set("amount","10000.00");invalid.Store.Upsert(act);
+                    foreach(string text in new[]{""," ","-1","0","1,234","1.234","12.340","1e2","1,2.3","1..2","40 50","40\u00a050","NaN","79228162514264337593543950336","1000000000000.01","10000.01"})
+                    {
+                        byte[] before=File.ReadAllBytes(invalid.Store.DataPath),backup=File.ReadAllBytes(invalid.Store.DataPath+".bak");long revision=invalid.Store.Revision;
+                        using(var dialog=new ManualPaymentDialog(invalid.Store,invalid.Act.Id))
+                        {
+                            dialog.ShowInTaskbar=false;dialog.Opacity=0;dialog.Show();Application.DoEvents();EnterAmount(dialog,text);
+                            var input=Field<TextBox>(dialog,"amount");input.Focus();PressOwnKey(input,Keys.Enter);ClickConfirmation(dialog);ClickConfirmation(dialog);
+                            Check(dialog.Payment==null&&Field<Label>(dialog,"error").Text!=""&&invalid.Store.Revision==revision&&before.SequenceEqual(File.ReadAllBytes(invalid.Store.DataPath))&&backup.SequenceEqual(File.ReadAllBytes(invalid.Store.DataPath+".bak")),"raw invalid amount preserves ledger and backup after native entry and repeated clicks: "+culture+" / "+text);
+                        }
+                    }
+                    var valid=new Fixture(root,"valid-"+culture,false,true);int count=0;
+                    foreach(string text in new[]{"40,50","40.50"})
+                    {
+                        using(var dialog=new ManualPaymentDialog(valid.Store,valid.Act.Id))
+                        {
+                            dialog.ShowInTaskbar=false;dialog.Opacity=0;dialog.Show();Application.DoEvents();EnterAmount(dialog,text);
+                            IntPtr button=Field<Button>(dialog,"confirm").Handle;long revision=valid.Store.Revision;
+                            if(count==0){var input=Field<TextBox>(dialog,"amount");input.Focus();PressOwnKey(input,Keys.Enter);}else ClickConfirmation(dialog);
+                            SendMessage(button,0x00F5,IntPtr.Zero,IntPtr.Zero);Application.DoEvents();count++;
+                            Check(dialog.Payment!=null&&dialog.Payment.Get("amount")=="40.50"&&valid.Store.Revision==revision+1&&valid.Store.Records.Count(r=>r.Kind=="payment")==count,"comma and dot each save exact amount once after native entry: "+culture+" / "+text);
+                            Check(new Store(valid.Dir).Find(dialog.Payment.Id).Get("amount")=="40.50","native entered amount survives store reload: "+culture+" / "+text);
+                        }
+                    }
+                    long cancelRevision=invalid.Store.Revision;
+                    using(var dialog=new ManualPaymentDialog(invalid.Store,invalid.Act.Id))
+                    {
+                        dialog.ShowInTaskbar=false;dialog.Opacity=0;dialog.Show();Application.DoEvents();EnterAmount(dialog,"25.50");
+                        var input=Field<TextBox>(dialog,"amount");input.Focus();PressOwnKey(input,Keys.Escape);
+                        Check(dialog.DialogResult==DialogResult.Cancel&&dialog.Payment==null&&invalid.Store.Revision==cancelRevision,"native Escape cancels entered amount without storing: "+culture);
+                    }
+                    var notesFixture=new Fixture(root,"notes-"+culture,false,true);
+                    using(var dialog=new ManualPaymentDialog(notesFixture.Store,notesFixture.Act.Id))
+                    {
+                        dialog.ShowInTaskbar=false;dialog.Opacity=0;dialog.Show();Application.DoEvents();EnterAmount(dialog,"40.50");
+                        var notes=Field<TextBox>(dialog,"notes");notes.Focus();
+                        foreach(char character in "Первая строка")SendMessage(notes.Handle,0x0102,new IntPtr(character),IntPtr.Zero);
+                        long revision=notesFixture.Store.Revision;PressOwnKey(notes,Keys.Enter);
+                        Check(dialog.Payment==null&&notesFixture.Store.Revision==revision&&notes.Text.Contains("\n"),"native Enter in multiline notes inserts a newline without confirming payment: "+culture);
+                        foreach(char character in "Вторая строка")SendMessage(notes.Handle,0x0102,new IntPtr(character),IntPtr.Zero);
+                        string enteredNotes=notes.Text;
+                        ClickConfirmation(dialog);
+                        Check(dialog.Payment!=null&&new Store(notesFixture.Dir).Find(dialog.Payment.Id).Get("notes")==enteredNotes,"explicit confirmation preserves the exact entered multiline notes: "+culture);
+                    }
+                }
+            }
+            finally{Thread.CurrentThread.CurrentCulture=previous;}
+        }
+        private static Record Reference(Store store,Record party,string key,string suffix)
+        {
+            return key=="contractId"
+                ?Add(store,"contract","number","CONTRACT-"+suffix,"date","2026-09-01","partyId",party.Id,"amount","1000.00","currency","BYN","direction","income","status","active")
+                :Add(store,"project","name","Project "+suffix,"partyId",party.Id,"status","active");
+        }
+        internal static void ReferenceCompatibilityChecks(string root)
+        {
+            foreach(string key in new[]{"contractId","projectId"})
+            {
+                string prefix=key=="contractId"?"c":"p";
+                foreach(bool advance in new[]{false,true})
+                {
+                    var f=new Fixture(root,prefix+"bad"+(advance?"a":"n"),false,true);
+                    var first=Reference(f.Store,f.Party,key,"A");var other=Reference(f.Store,f.Party,key,"B");
+                    f.Act.Set(key,first.Id);f.Store.Upsert(f.Act);
+                    var payment=f.Receipt(100m);payment.Set(key,other.Id);payment.Set("bankPurpose","Оплата по акту № "+f.Act.Get("number"));
+                    if(advance)payment.Set("date","2026-09-30");f.Store.Upsert(payment);
+                    var view=f.Store.GetManualPaymentView(f.Act.Id,Today);
+                    Check(view.Balance.Due==100m&&view.Balance.Paid==0&&view.Balance.NeedsReview&&view.Payments.Count==0,"conflicting "+key+" leaves ordinary act due and excludes incompatible candidate; advance="+advance);
+                    RejectUnchanged(f.Store,delegate{f.Confirm(100m);},"conflicting purpose prevents duplicate new payment; "+key+" advance="+advance);
+                    RejectUnchanged(f.Store,delegate{f.Confirm(100m,payment.Id);},"conflicting existing reference cannot be confirmed; "+key+" advance="+advance);
+                    Check(f.Received()==100m&&f.Store.PaymentUnallocated(payment.Id)==100m&&QuarterlyTaxes.CalculateAllTime(f.Store,"BYN").Receipts==100m,"blocked confirmation preserves receipt amount advance and tax base; "+key+" advance="+advance);
+                    payment.Set(key,first.Id);f.Store.Upsert(payment);
+                    view=f.Store.GetManualPaymentView(f.Act.Id,Today);
+                    Check(view.Balance.Due==0&&!view.Balance.NeedsReview,"correcting conflicting "+key+" restores exact bank-purpose recognition; advance="+advance);
+                }
+                for(int scenario=0;scenario<3;scenario++)
+                {
+                    var f=new Fixture(root,prefix+"ok"+scenario,false,true);var reference=Reference(f.Store,f.Party,key,"MATCH");
+                    if(scenario!=1){f.Act.Set(key,reference.Id);f.Store.Upsert(f.Act);}
+                    var payment=f.Receipt(100m);if(scenario!=0){payment.Set(key,reference.Id);f.Store.Upsert(payment);}
+                    Check(f.Store.GetManualPaymentView(f.Act.Id,Today).Payments.Any(p=>p.Id==payment.Id),"manual candidates accept matching references and either empty side; "+key+" scenario="+scenario);
+                    f.Confirm(100m,payment.Id);
+                    Check(f.Store.ActDue(f.Act.Id)==0&&f.Received()==100m&&f.Store.PaymentUnallocated(payment.Id)==0&&QuarterlyTaxes.CalculateAllTime(f.Store,"BYN").Receipts==100m,"compatible existing payment credits once with stable funds and tax base; "+key+" scenario="+scenario);
+                }
+                {
+                    var f=new Fixture(root,prefix+"other",false,true);var first=Reference(f.Store,f.Party,key,"A");var other=Reference(f.Store,f.Party,key,"B");
+                    f.Act.Set(key,first.Id);f.Store.Upsert(f.Act);var payment=f.Receipt(100m);payment.Set(key,other.Id);f.Store.Upsert(payment);
+                    var view=f.Store.GetManualPaymentView(f.Act.Id,Today);
+                    Check(view.Balance.Due==100m&&!view.Balance.NeedsReview&&view.Payments.Count==0,"unrelated known "+key+" without matching purpose permits a separate payment");
+                    f.Confirm(100m);
+                    Check(f.Balance().Due==0&&f.Received()==200m&&f.Store.PaymentUnallocated(payment.Id)==100m,"separate confirmed payment leaves unrelated "+key+" receipt unallocated");
+                }
+            }
+            {
+                var f=new Fixture(root,"same-number",false,true);
+                var first=Reference(f.Store,f.Party,"contractId","A");var other=Reference(f.Store,f.Party,"contractId","B");
+                f.Act.Set("contractId",first.Id);f.Store.Upsert(f.Act);
+                var otherAct=Add(f.Store,"act","number",f.Act.Get("number"),"date","2026-10-01","partyId",f.Party.Id,"contractId",other.Id,"amount","100.00","currency","BYN","direction","income","status","signed");
+                var payment=f.Receipt(100m);payment.Set("contractId",first.Id);payment.Set("bankPurpose","Оплата по акту № "+f.Act.Get("number"));f.Store.Upsert(payment);
+                var matched=f.Store.GetManualPaymentView(f.Act.Id,Today);var unmatched=f.Store.GetManualPaymentView(otherAct.Id,Today);
+                Check(matched.Balance.Paid==100m&&matched.Balance.Due==0&&!matched.Balance.NeedsReview,"same-number acts resolve exact compatible contract once");
+                Check(unmatched.Balance.Paid==0&&unmatched.Balance.Due==100m&&!unmatched.Balance.NeedsReview&&unmatched.Payments.Count==0,"unique match to another contract does not require review for same-number act");
+                Check(f.Received()==100m&&f.Store.PaymentUnallocated(payment.Id)==100m&&QuarterlyTaxes.CalculateAllTime(f.Store,"BYN").Receipts==100m,"same-number purpose matching preserves actual funds and tax base");
+            }
+        }
         public static void Run(string root)
         {
             checks=0;Directory.CreateDirectory(root);var f=new Fixture(root,"partial-service",true);long revision=f.Store.Revision;
@@ -98,6 +230,7 @@ namespace WorkLedger
             Check(receipt.Get("direction")=="expense"&&f.Received()==0m&&QuarterlyTaxes.Calculate(f.Store,2026,4,"BYN").Receipts==0m&&f.Store.ActDue(f.Act.Id)==0m,"outgoing act confirmation is not counted as income");
             f=new Fixture(root,"wrong-receipts",false,true);bank=f.Receipt(100m,"USD");var outgoing=f.Receipt(100m,"BYN","expense");
             Check(!f.Store.GetManualPaymentView(f.Act.Id,Today).Payments.Any(),"wrong currency and direction are excluded from candidates");
+            ReferenceCompatibilityChecks(Path.Combine(root,"refs"));
             RejectUnchanged(f.Store,delegate{f.Confirm(100m,bank.Id);},"wrong currency cannot be confirmed for act");
             RejectUnchanged(f.Store,delegate{f.Confirm(100m,outgoing.Id);},"outgoing receipt cannot settle incoming act");
             f=new Fixture(root,"invalid-new",false,true);
@@ -118,6 +251,7 @@ namespace WorkLedger
             RejectUnchanged(f.Store,delegate{f.Confirm(100m);},"cancelled act cannot accept confirmation");
             f=new Fixture(root,"backup-manual",true);f.Confirm(120m);string backup=Path.Combine(root,"manual-backup.zip"),restored=Path.Combine(root,"restored");BackupArchive.Create(f.Dir,backup);BackupArchive.Restore(backup,restored,MainForm.ValidateSnapshot);
             Check(ServiceReminderLedger.Build(new Store(restored).Records,Today).Single().Due==0&&new Store(restored).Audit.Any(a=>a.Summary.Contains("Ручное подтверждение оплаты")),"backup transfer preserves manual receipt and audit");
+            AmountInputChecks(Path.Combine(root,"amount-input"));
             UiChecks(root);
             File.WriteAllText(Path.Combine(root,"PASS.txt"),"PASS: "+checks+" manual payment checks; fixtures only, no real email sent.",Encoding.UTF8);
         }
@@ -127,10 +261,10 @@ namespace WorkLedger
             using(var dialog=new ManualPaymentDialog(f.Store,f.Act.Id))
             {
                 dialog.ShowInTaskbar=false;dialog.Opacity=0;dialog.Show();Application.DoEvents();
-                Field<NumericUpDown>(dialog,"amount").Value=999m;
-                Check(!dialog.SaveConfirmation()&&Field<Label>(dialog,"error").Text!=""&&before.SequenceEqual(File.ReadAllBytes(f.Store.DataPath)),"form reports invalid amount without altering ledger");
-                Field<NumericUpDown>(dialog,"amount").Value=120m;Field<DateTimePicker>(dialog,"date").Value=new DateTime(2026,10,9);
-                Check(dialog.SaveConfirmation()&&dialog.Payment!=null&&f.Balance().Due==0,"actual confirmation button workflow saves receipt");
+                EnterAmount(dialog,"999");ClickConfirmation(dialog);
+                Check(dialog.Payment==null&&Field<Label>(dialog,"error").Text!=""&&before.SequenceEqual(File.ReadAllBytes(f.Store.DataPath)),"form reports invalid amount without altering ledger");
+                EnterAmount(dialog,"120");Field<DateTimePicker>(dialog,"date").Value=new DateTime(2026,10,9);ClickConfirmation(dialog);
+                Check(dialog.Payment!=null&&f.Balance().Due==0,"actual confirmation button workflow saves receipt");
             }
             using(var main=new MainForm(f.Store,false))
             {
@@ -152,8 +286,8 @@ namespace WorkLedger
             using(var dialog=new ManualPaymentDialog(f.Store,f.Act.Id))
             {
                 dialog.ShowInTaskbar=false;dialog.Opacity=0;dialog.Show();Application.DoEvents();
-                Check(Field<ComboBox>(dialog,"source").SelectedIndex==1&&!Field<NumericUpDown>(dialog,"amount").Enabled,"form defaults to existing receipt and prevents partial direct-link mistake");
-                Check(dialog.SaveConfirmation()&&dialog.Payment.Id==receipt.Id&&f.Received()==120m,"existing-payment form workflow creates no duplicate funds");
+                Check(Field<ComboBox>(dialog,"source").SelectedIndex==1&&!Field<TextBox>(dialog,"amount").Enabled,"form defaults to existing receipt and prevents partial direct-link mistake");
+                ClickConfirmation(dialog);Check(dialog.Payment!=null&&dialog.Payment.Id==receipt.Id&&f.Received()==120m,"existing-payment form workflow creates no duplicate funds");
             }
             f=new Fixture(root,"ui-commands",true);
             using(var window=new ServiceReminderWindow(f.Store,null))

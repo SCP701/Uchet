@@ -150,8 +150,7 @@ namespace WorkLedger
 
         private static bool TryNumber(object value, out decimal number)
         {
-            string text = Convert.ToString(value).Trim().Replace(" ", "").Replace("\u00A0", "").Replace("\u202F", "").Replace(',', '.');
-            return Decimal.TryParse(text, NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out number);
+            return NumericText.TryParse(Convert.ToString(value), NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint, out number);
         }
 
         private bool AllHourlyUnits()

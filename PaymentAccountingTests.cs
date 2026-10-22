@@ -4,8 +4,11 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Web.Script.Serialization;
+using System.Windows.Forms;
 
 namespace WorkLedger
 {
@@ -298,7 +301,18 @@ namespace WorkLedger
                 True(!File.Exists(s.DataPath), "snapshot does not create ledger"); Reject(delegate { a.ForId("missing-synthetic-payment"); }); Reject(delegate { a.ForId(""); });
                 Reject(delegate { a.For(null); }); Reject(delegate { a.For(R("act")); }); Reject(delegate { PaymentAccounting.Build(null); });
             });
-            File.WriteAllText(Path.Combine(folder, "PASS.txt"), "PASS: " + passed.ToString(CultureInfo.InvariantCulture) + " groups; mixed and direct advances, explicit integrity, atomic storage and imports, reversals, archived references, no migration, cents/currencies, single-pass immutable snapshots.", new UTF8Encoding(false));
+            test("allocation dialog native decimal input preserves both separators without rounding", delegate
+            {
+                foreach (string culture in new[] { "ru-RU", "en-US" })
+                    foreach (string text in new[] { "40.50", "40,50" }) AllocationInput(folder, culture, text, true);
+            });
+            test("allocation dialog rejects invalid native input without changing ledger backup or audit", delegate
+            {
+                foreach (string culture in new[] { "ru-RU", "en-US" })
+                    foreach (string text in new[] { "", " ", "40.505", "40,505", "40.500", "0", "-1", "40 50", "1e2", "10000.01", "79228162514264337593543950335", "999999999999999999999999999999" })
+                        AllocationInput(folder, culture, text, false);
+            });
+            File.WriteAllText(Path.Combine(folder, "PASS.txt"), "PASS: " + passed.ToString(CultureInfo.InvariantCulture) + " groups; mixed and direct advances, explicit integrity, atomic storage and imports, reversals, archived references, no migration, cents/currencies, single-pass immutable snapshots, native allocation entry with strict cents and unchanged backup on rejection.", new UTF8Encoding(false));
             Console.WriteLine("Payment accounting: " + passed.ToString(CultureInfo.InvariantCulture) + " groups passed. Synthetic artifacts: " + folder);
         }
 
@@ -306,6 +320,59 @@ namespace WorkLedger
         {
             SavedState state = Capture(store); PaymentAccounting accounting = PaymentAccounting.Build(store.Records);
             state.Unchanged(store, "snapshot calculation is read-only"); return accounting;
+        }
+        private delegate bool EnumWindow(IntPtr window, IntPtr state);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr SendMessageW(IntPtr window, uint message, IntPtr wparam, IntPtr lparam);
+        [DllImport("user32.dll")] private static extern bool EnumThreadWindows(uint thread, EnumWindow callback, IntPtr state);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassNameW(IntPtr window, StringBuilder value, int maximum);
+        [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr window, uint command);
+        [DllImport("user32.dll")] private static extern bool EndDialog(IntPtr window, IntPtr result);
+        [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
+        private static void AllocationInput(string root, string culture, string text, bool accepted)
+        {
+            CultureInfo previousCulture = CultureInfo.CurrentCulture, previousUi = CultureInfo.CurrentUICulture;
+            try
+            {
+                CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo(culture); CultureInfo.CurrentUICulture = CultureInfo.GetCultureInfo(culture);
+                Store store = Fresh(root, "native-" + Guid.NewGuid().ToString("N").Substring(0, 8)); Record party = Party(store);
+                Record act = Act(store, party, "standard", 10000m), payment = Payment(store, party, 10000m);
+                SavedState before = Capture(store); byte[] backup = File.ReadAllBytes(store.DataPath + ".bak"); int warnings = 0;
+                using (var dialog = new AllocationDialog(store, act))
+                using (var timer = new System.Windows.Forms.Timer { Interval = 20 })
+                {
+                    dialog.ShowInTaskbar = false; dialog.Opacity = 0; dialog.Show(); Application.DoEvents();
+                    TextBox input = (TextBox)typeof(AllocationDialog).GetField("amount", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(dialog);
+                    SendMessageW(input.Handle, 0xB1, IntPtr.Zero, new IntPtr(-1)); SendMessageW(input.Handle, 0x303, IntPtr.Zero, IntPtr.Zero);
+                    foreach (char character in text) SendMessageW(input.Handle, 0x102, (IntPtr)character, new IntPtr(1));
+                    Eq(input.Text, text, "native allocation text"); IntPtr owner = dialog.Handle;
+                    timer.Tick += delegate
+                    {
+                        EnumThreadWindows(GetCurrentThreadId(), delegate(IntPtr window, IntPtr ignored)
+                        {
+                            var name = new StringBuilder(256); GetClassNameW(window, name, name.Capacity);
+                            if (name.ToString() == "#32770" && GetWindow(window, 4) == owner) { warnings++; EndDialog(window, new IntPtr(1)); }
+                            return true;
+                        }, IntPtr.Zero);
+                    };
+                    timer.Start();
+                    Button save = dialog.Controls.OfType<Button>().Single(button => button.Text == "Зачесть");
+                    SendMessageW(save.Handle, 0xF5, IntPtr.Zero, IntPtr.Zero); timer.Stop(); Application.DoEvents();
+                    if (accepted)
+                    {
+                        Eq(store.AllocatedToAct(act.Id), 40.50m, "native allocation amount"); Eq(store.PaymentUnallocated(payment.Id), 9959.50m, "native allocation advance");
+                        Eq(store.Revision, before.Revision + 1, "native allocation commits once"); Eq(warnings, 0, "valid allocation warning count");
+                        Eq(new Store(store.DataDir).AllocatedToAct(act.Id), 40.50m, "native allocation reload");
+                    }
+                    else
+                    {
+                        before.Unchanged(store, "invalid native allocation input " + culture); True(warnings > 0, "invalid allocation shows warning");
+                        True(backup.SequenceEqual(File.ReadAllBytes(store.DataPath + ".bak")), "invalid allocation preserves backup");
+                        Eq(new Store(store.DataDir).Revision, before.Revision, "invalid allocation reload revision");
+                    }
+                    if (!dialog.IsDisposed) dialog.Close();
+                }
+            }
+            finally { CultureInfo.CurrentCulture = previousCulture; CultureInfo.CurrentUICulture = previousUi; }
         }
         private static void Split(PaymentAccounting accounting, Record payment, decimal white, decimal grey, decimal allocatedWhite, decimal allocatedGrey, decimal unallocated)
         {

@@ -4,6 +4,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
 namespace WorkLedger
@@ -13,6 +14,93 @@ namespace WorkLedger
         private static void Assert(bool condition, string message)
         {
             if (!condition) throw new InvalidOperationException("Editor test: " + message);
+        }
+        [DllImport("user32.dll",CharSet=CharSet.Unicode)] private static extern IntPtr SendMessage(IntPtr window,int message,IntPtr wParam,IntPtr lParam);
+        [DllImport("user32.dll",CharSet=CharSet.Unicode,EntryPoint="SendMessageW")] private static extern IntPtr SendText(IntPtr window,int message,IntPtr wParam,string text);
+        [DllImport("user32.dll")] private static extern bool PostMessage(IntPtr window,int message,IntPtr wParam,IntPtr lParam);
+        private static T InputField<T>(object target,string name)
+        { return (T)target.GetType().GetField(name,BindingFlags.Instance|BindingFlags.NonPublic).GetValue(target); }
+        private static void NativeText(TextBoxBase input,string text)
+        {
+            input.Focus();SendMessage(input.Handle,0x00B1,IntPtr.Zero,new IntPtr(-1));SendMessage(input.Handle,0x0102,new IntPtr(8),IntPtr.Zero);
+            foreach(char character in text)SendMessage(input.Handle,0x0102,new IntPtr(character),new IntPtr(1));
+            Application.DoEvents();
+        }
+        private static void NativeClick(Button button)
+        { SendMessage(button.Handle,0x00F5,IntPtr.Zero,IntPtr.Zero);Application.DoEvents(); }
+        private static void NativeCell(DataGridView grid,string column,string text)
+        {
+            grid.CurrentCell=grid.Rows[0].Cells[column];Assert(grid.BeginEdit(true),"native grouped cell did not enter edit mode");
+            var edit=grid.EditingControl as TextBoxBase;Assert(edit!=null,"native grouped cell has no text editor");
+            edit.Focus();SendMessage(edit.Handle,0x00B1,IntPtr.Zero,new IntPtr(-1));SendText(edit.Handle,0x00C2,new IntPtr(1),text);
+            Assert(edit.Text==text,"native pasted grid text differs from the intended raw input");
+            PostMessage(edit.Handle,0x0100,new IntPtr((int)Keys.Tab),new IntPtr(1));PostMessage(edit.Handle,0x0101,new IntPtr((int)Keys.Tab),new IntPtr(unchecked((int)0xC0000001)));Application.DoEvents();grid.EndEdit();
+            Assert(Convert.ToString(grid.Rows[0].Cells[column].Value)==text,"native pasted grid text changed during cell commit");
+        }
+        private static void ShowOwnForm(Form form)
+        { form.ShowInTaskbar=false;form.Opacity=0;form.Show();Application.DoEvents(); }
+        private static void CheckGroupedRejections(Store store,Action<string> enter,Action save,string scenario)
+        {
+            long revision=store.Revision;byte[] before=File.ReadAllBytes(store.DataPath),backup=File.ReadAllBytes(store.DataPath+".bak");
+            foreach(string text in new[]{"40 50","40\u00a050","40\u202f50","1 00","4 0,5","1,2 3","1,234.56","1.234,56"})
+            {
+                enter(text);save();
+                Assert(store.Revision==revision&&before.SequenceEqual(File.ReadAllBytes(store.DataPath))&&backup.SequenceEqual(File.ReadAllBytes(store.DataPath+".bak")),scenario+" merged invalid grouping or changed the ledger/backup: "+text);
+            }
+        }
+        internal static void RunNumericInputChecks(string root)
+        {
+            NumberStyles signed=NumberStyles.AllowLeadingSign|NumberStyles.AllowDecimalPoint;decimal number;
+            var valid=new Dictionary<string,decimal>{
+                {"12.34",12.34m},{"12,34",12.34m},{".5",0.5m},{",5",0.5m},{"1 000,50",1000.50m},{"1\u00a0000.50",1000.50m},
+                {"1\u202f000,50",1000.50m},{"12 345 678,9",12345678.9m},{"-1 234.50",-1234.50m},{"+1 234,50",1234.50m},{"\t1 000,50\r\n",1000.50m}
+            };
+            foreach(var pair in valid)Assert(NumericText.TryParse(pair.Key,signed,out number)&&number==pair.Value,"valid numeric grouping changed its value: "+pair.Key);
+            foreach(string text in new[]{""," ","40 50","40\u00a050","40\u202f50","1 00","4 0,5","1,2 3","1  000","1234 567","1 000 .50","1 000, 50","- 123","1,234.56","1.234,56","1e2","1'000","79228162514264337593543950336"})
+                Assert(!NumericText.TryParse(text,signed,out number),"invalid numeric grouping was accepted: "+text);
+            Assert(!NumericText.TryParse("+1",NumberStyles.AllowDecimalPoint,out number)&&!NumericText.TryParse("-1",NumberStyles.AllowDecimalPoint,out number),"signless hourly parsing started accepting a sign");
+            var store=new Store(Path.Combine(root,"data"));Save(store,"settings","name","Synthetic numeric organization","currency","BYN","hourlyRate","10.00");
+            var party=Save(store,"party","name","Synthetic numeric customer","role","both");
+            var payment=Save(store,"payment","date","2026-10-01","partyId",party.Id,"amount","10.00","currency","BYN","direction","income","method","cash");
+            using(var form=new RecordEditor(store,Catalog.Get("payment"),payment))
+            {
+                ShowOwnForm(form);var input=(TextBox)Inputs(form)["amount"];
+                CheckGroupedRejections(store,text=>NativeText(input,text),()=>NativeClick((Button)form.AcceptButton),"RecordEditor amount");
+                NativeText(input,"1 000,50");NativeClick((Button)form.AcceptButton);
+                Assert(form.ResultRecord!=null&&new Store(store.DataDir).Find(payment.Id).Get("amount")=="1000.50","RecordEditor lost a correctly grouped amount");
+            }
+            var itemsAct=Save(store,"act","number","GROUP-ITEMS","date","2026-10-01","partyId",party.Id,"amount","100.00","currency","BYN","direction","income","status","draft","description","Grouping operation");
+            using(var form=new ActItemsEditor(store,itemsAct))
+            {
+                ShowOwnForm(form);var grid=InputField<DataGridView>(form,"items");var save=InputField<Button>(form,"save");
+                CheckGroupedRejections(store,text=>NativeCell(grid,"price",text),()=>NativeClick(save),"ActItemsEditor price");
+                NativeCell(grid,"price","1\u00a0000.50");NativeClick(save);
+                Assert(form.ResultRecord!=null&&new Store(store.DataDir).Find(itemsAct.Id).Get("amount")=="1000.50","ActItemsEditor lost a correctly grouped price");
+            }
+            var worksAct=Save(store,"act","number","GROUP-WORKS","date","2026-10-01","partyId",party.Id,"amount","100.00","currency","BYN","direction","income","status","draft","description","Grouping operation");
+            using(var form=new RecordEditor(store,Catalog.Get("act"),worksAct))
+            {
+                ShowOwnForm(form);var works=InputField<ActWorkItemsControl>(form,"actWorks");var grid=works.WorkGrid;
+                for(Control parent=grid.Parent;parent!=null;parent=parent.Parent)if(parent is TabPage)((TabControl)parent.Parent).SelectedTab=(TabPage)parent;
+                Application.DoEvents();var manual=InputField<CheckBox>(works,"manualPricing");if(manual.Checked)SendMessage(manual.Handle,0x00F5,IntPtr.Zero,IntPtr.Zero);
+                CheckGroupedRejections(store,text=>NativeCell(grid,"price",text),()=>NativeClick((Button)form.AcceptButton),"ActWorkItemsControl price");
+                NativeCell(grid,"price","1\u202f000,50");NativeClick((Button)form.AcceptButton);
+                Assert(form.ResultRecord!=null&&new Store(store.DataDir).Find(worksAct.Id).Get("amount")=="1000.50","ActWorkItemsControl lost a correctly grouped price");
+            }
+            using(var host=new Form{Width=1060,Height=720})
+            using(var composer=new HourlyActComposer(store))
+            {
+                var save=new Button{Text="Own host save",Dock=DockStyle.Bottom};string error=null;
+                save.Click+=delegate{error=null;try{composer.SaveDraft();}catch(InvalidOperationException e){error=e.Message;}};
+                host.Controls.Add(composer);host.Controls.Add(save);ShowOwnForm(host);composer.SelectCounterparty(party.Id);
+                composer.WorkGrid.Rows.Add("Native grouped hourly operation","1","10","");
+                CheckGroupedRejections(store,text=>NativeCell(composer.WorkGrid,"rate",text),()=>NativeClick(save),"HourlyActComposer rate through own native host button");
+                NativeCell(composer.WorkGrid,"rate","10");
+                CheckGroupedRejections(store,text=>NativeCell(composer.WorkGrid,"hours",text),()=>NativeClick(save),"HourlyActComposer hours through own native host button");
+                NativeCell(composer.WorkGrid,"hours","1");NativeCell(composer.WorkGrid,"rate","1\u00a0000.50");NativeClick(save);
+                Assert(error==null&&composer.ResultRecord!=null&&new Store(store.DataDir).Find(composer.ResultRecord.Id).Get("amount")=="1000.50","HourlyActComposer lost a correctly grouped rate");
+            }
+            Console.WriteLine("PASS: UI numeric grouping matrix; own-HWND WM_CHAR text entry / EM_REPLACESEL raw grid insertion, queued Tab and BM_CLICK save checks for RecordEditor, ActItemsEditor, ActWorkItemsControl and HourlyActComposer; invalid input preserves ledger/backup; valid grouped values survive reload.");
         }
         private static Dictionary<string, Control> Inputs(RecordEditor editor)
         {
@@ -262,6 +350,7 @@ namespace WorkLedger
                     "reference Label (ID) did not take precedence over key and ambiguous human label");
                 Assert(prepared[0].Id != "source-record-id", "source record identifier was reused");
             }
+            RunNumericInputChecks(Path.Combine(tempdir,"numeric-input"));
             Console.WriteLine("PASS: editor save/autofill/precision; import mapping/defaults/Excel dates/NBSP money/ref ID precedence; invalid rows and atomic rollback.");
         }
     }

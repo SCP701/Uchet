@@ -13,7 +13,7 @@ namespace WorkLedger
         private readonly Icon applicationIcon;
         private readonly ComboBox source=new ComboBox(),method=new ComboBox();
         private readonly DateTimePicker date=new DateTimePicker();
-        private readonly NumericUpDown amount=new NumericUpDown();
+        private readonly TextBox amount=new TextBox();
         private readonly TextBox number=new TextBox(),notes=new TextBox();
         private readonly Label information=new Label(),error=new Label();
         private readonly Button confirm=new UiButton();
@@ -31,9 +31,9 @@ namespace WorkLedger
             source.Items.Add("Новая оплата — внести платёж");
             foreach(var payment in view.Payments)source.Items.Add(ServiceReminderLedger.Date(payment.Get("date")).ToString("dd.MM.yyyy")+" · "+view.Available[payment.Id].ToString("N2")+" "+payment.Get("currency")+" · "+(payment.Get("number")==""?"платёж без номера":"№ "+payment.Get("number")));
             date.Name="paymentDate";date.Format=DateTimePickerFormat.Custom;date.CustomFormat="dd.MM.yyyy";date.MaxDate=MonthlyServiceRuntime.Today;date.Value=MonthlyServiceRuntime.Today;
-            amount.Name="paymentAmount";amount.DecimalPlaces=2;amount.ThousandsSeparator=true;amount.Minimum=0.01m;amount.Maximum=1000000000000m;
+            amount.Name="paymentAmount";amount.TextAlign=HorizontalAlignment.Right;amount.MaxLength=100;
             method.Name="paymentMethod";method.DropDownStyle=ComboBoxStyle.DropDownList;method.Items.AddRange(new object[]{"Банк","Наличные","Другой способ"});method.SelectedIndex=0;
-            number.Name="paymentNumber";number.MaxLength=200;notes.Name="paymentNotes";notes.Multiline=true;notes.ScrollBars=ScrollBars.Vertical;notes.MaxLength=4000;
+            number.Name="paymentNumber";number.MaxLength=200;notes.Name="paymentNotes";notes.Multiline=true;notes.AcceptsReturn=true;notes.ScrollBars=ScrollBars.Vertical;notes.MaxLength=4000;
             var fields=new TableLayoutPanel{Dock=DockStyle.Top,AutoSize=true,ColumnCount=2,Padding=new Padding(20,6,20,6)};
             fields.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute,142));fields.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));
             Row(fields,"Платёж",source,46);Row(fields,"Дата оплаты",date,40);Row(fields,"Сумма",amount,40);Row(fields,"Способ оплаты",method,40);Row(fields,"Номер платежа",number,40);Row(fields,"Комментарий",notes,68);
@@ -63,17 +63,28 @@ namespace WorkLedger
             {
                 date.Value=ServiceReminderLedger.Date(payment.Get("date"));method.SelectedIndex=payment.Get("method")=="bank"?0:payment.Get("method")=="cash"?1:2;
                 number.Text=payment.Get("number");notes.Text=payment.Get("notes");
-                amount.Value=Math.Max(0.01m,amount.Enabled?Math.Min(view.Available[payment.Id],view.Balance.Due):view.Available[payment.Id]);
+                SetAmount(Math.Max(0.01m,amount.Enabled?Math.Min(view.Available[payment.Id],view.Balance.Due):view.Available[payment.Id]));
                 information.Text="Будет использован выбранный платёж. Новый платёж не создаётся."+
                     (view.Balance.Act.Get("status")=="signed"?"\r\nСумма зачтётся в оплату этого акта.":"\r\nС актом свяжется вся свободная сумма. Статус подписи сохраняется.");
             }
             else
             {
-                date.Value=MonthlyServiceRuntime.Today;method.SelectedIndex=0;number.Clear();notes.Clear();amount.Value=Math.Max(0.01m,view.Balance.Due);
+                date.Value=MonthlyServiceRuntime.Today;method.SelectedIndex=0;number.Clear();notes.Clear();SetAmount(Math.Max(0.01m,view.Balance.Due));
                 information.Text="Укажите фактически "+(view.Balance.Act.Get("direction")=="income"?"полученную":"перечисленную")+" сумму. Она попадёт в список оплат."+
                     "\r\nПри полной оплате напоминания прекратятся. Статус подписи акта сохраняется.";
             }
             confirm.Enabled=view.Balance.Due>0;error.Text=view.Balance.Due<=0?"Оплата этого акта уже учтена.":"";
+        }
+        private void SetAmount(decimal value)
+        { amount.Text=value.ToString("0.00",CultureInfo.CurrentCulture); }
+        private decimal EnteredAmount()
+        {
+            string text=amount.Text.Trim().Replace(',','.');decimal value;
+            int separator=text.IndexOf('.');
+            if(!Decimal.TryParse(text,NumberStyles.AllowLeadingSign|NumberStyles.AllowDecimalPoint,CultureInfo.InvariantCulture,out value)
+                ||value<=0m||value>1000000000000m||separator>=0&&text.Length-separator-1>2)
+                throw new InvalidOperationException("Укажите сумму больше нуля и не больше одного триллиона, с точностью до копеек. Можно использовать запятую или точку.");
+            return value;
         }
         internal bool SaveConfirmation()
         {
@@ -82,7 +93,7 @@ namespace WorkLedger
             try
             {
                 string paymentId=source.SelectedIndex>0?view.Payments[source.SelectedIndex-1].Id:null;
-                Payment=store.ConfirmActPayment(actId,paymentId,amount.Value,date.Value,method.SelectedIndex==0?"bank":method.SelectedIndex==1?"cash":"other",number.Text,notes.Text,view.Revision,operationId);
+                Payment=store.ConfirmActPayment(actId,paymentId,EnteredAmount(),date.Value,method.SelectedIndex==0?"bank":method.SelectedIndex==1?"cash":"other",number.Text,notes.Text,view.Revision,operationId);
                 DialogResult=DialogResult.OK;Close();return true;
             }
             catch(Exception e){error.Text=e.Message;confirm.Enabled=true;return false;}

@@ -76,6 +76,36 @@ namespace WorkLedger
                     var bad = Manifest(goodZip, assembly, version); bad.MinDataVersion = bad.MaxDataVersion = 2; Reject(delegate { UpdateProtocol.ValidateDataVersion(Authenticate(bad, key, publicKey), ledger); });
                     File.WriteAllText(ledger, "{\"Version\":2}"); Reject(delegate { UpdateProtocol.ValidateDataVersion(m, ledger); });
                 });
+                test("large Cyrillic ledger remains update compatible without changing data", delegate {
+                    var store = new Store(Path.Combine(dir, "large-utf8-data")); string notes = new String('Я', 43000);
+                    Record[] records = Enumerable.Range(0, 200).Select(i => {
+                        var party = new Record("party"); party.Set("name", "Проверка " + i); party.Set("role", "client"); party.Set("notes", notes); return party;
+                    }).ToArray();
+                    store.ImportBatch(records); long bytes = new FileInfo(store.DataPath).Length; True(bytes > 32 * 1024 * 1024);
+                    string hash = UpdateProtocol.HashFile(store.DataPath); var m = Authenticate(original, key, publicKey);
+                    UpdateProtocol.CheckManifestDataVersion(m, store.DataPath);
+                    Eq(UpdateProtocol.HashFile(store.DataPath), hash);
+                    var loaded = new Store(store.DataDir); Eq(loaded.Revision, store.Revision); Eq(loaded.Records.Count, 200); Eq(loaded.Audit.Count, 200);
+                    Console.WriteLine("Update accepts unchanged UTF-8 ledger: " + bytes + " bytes.");
+                });
+                test("database JSON character limit still prevents oversized update checks", delegate {
+                    string ledger = Path.Combine(dir, "oversized-ledger.json");
+                    // Stream a valid JSON document over the character limit without constructing a huge fixture string.
+                    using (var writer = new StreamWriter(ledger, false, new UTF8Encoding(false)))
+                    {
+                        writer.Write("{\"Version\":1,\"Notes\":\""); string chunk = new String('x', 10000);
+                        for (int i = 0; i < 3201; i++) writer.Write(chunk);
+                        writer.Write("\"}");
+                    }
+                    try
+                    {
+                        long bytes = new FileInfo(ledger).Length; string hash = UpdateProtocol.HashFile(ledger);
+                        True(bytes > 32000000 && bytes < 96000000);
+                        Reject(delegate { UpdateProtocol.CheckManifestDataVersion(Authenticate(original, key, publicKey), ledger); });
+                        Eq(UpdateProtocol.HashFile(ledger), hash);
+                    }
+                    finally { File.Delete(ledger); }
+                });
                 test("job marker and exact startup acknowledgement", delegate {
                     string session = Path.Combine(dir, "session"); Directory.CreateDirectory(session); string nonce = Guid.NewGuid().ToString("N");
                     var job = new UpdateJob { ParentPid = 42, ParentStartUtcTicks = 12345, TargetDir = Path.Combine(dir, "app"), DataDir = Path.Combine(dir, "data"), SessionDir = session, Version = version, Nonce = nonce };

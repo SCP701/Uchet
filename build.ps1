@@ -15,10 +15,10 @@ $sourceFiles = @(Get-ChildItem -LiteralPath $projectDir -Filter '*.cs' | ForEach
 $outputExe = Join-Path $outputDir 'AktiOplaty.exe'
 & $compiler @common @references ('/resource:'+(Join-Path $projectDir 'resources\ActTemplate.docx')+',WorkLedger.ActTemplate.docx') ('/resource:'+$iconPath+',WorkLedger.AppIcon.ico') /target:winexe ('/out:'+$outputExe) @sourceFiles
 if ($LASTEXITCODE -ne 0) { throw 'Сборка приложения не удалась.' }
-$helperSources = @('UpdateProtocol.cs','TrustedUpdateKey.cs','Core.cs','Reports.cs','ActDocument.cs','ActHtmlDocument.cs','AssemblyInfo.cs','updater\UpdaterProgram.cs') | ForEach-Object { Join-Path $projectDir $_ }
+$helperSources = @('UpdateProtocol.cs','TrustedUpdateKey.cs','LedgerFormatLimits.cs','Core.cs','Reports.cs','ActDocument.cs','ActHtmlDocument.cs','AssemblyInfo.cs','updater\UpdaterProgram.cs') | ForEach-Object { Join-Path $projectDir $_ }
 & $compiler @common @references /target:winexe ('/out:'+(Join-Path $outputDir 'Updater.exe')) @helperSources
 if ($LASTEXITCODE -ne 0) { throw 'Сборка модуля обновления не удалась.' }
-$releaseSources = @('UpdateProtocol.cs','TrustedUpdateKey.cs','maintenance\ReleaseTool.cs') | ForEach-Object { Join-Path $projectDir $_ }
+$releaseSources = @('UpdateProtocol.cs','TrustedUpdateKey.cs','LedgerFormatLimits.cs','maintenance\ReleaseTool.cs') | ForEach-Object { Join-Path $projectDir $_ }
 & $compiler @references /nologo /target:exe ('/out:'+(Join-Path $outputDir 'ReleaseTool.exe')) @releaseSources
 if ($LASTEXITCODE -ne 0) { throw 'Сборка инструмента выпуска не удалась.' }
 if ($Test) {

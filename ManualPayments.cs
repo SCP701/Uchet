@@ -21,7 +21,7 @@ namespace WorkLedger
                 ||payment.Get("direction")!=act.Get("direction")||ServiceReminderLedger.Date(payment.Get("date"))>today.Date)return false;
             string scope=payment.Get("paymentScope");
             if(scope!=""&&(scope=="external")!=IsExternalAct(act))return false;
-            return new[]{"projectId","contractId"}.All(k=>payment.Get(k)==""||act.Get(k)==""||payment.Get(k)==act.Get(k));
+            return ServiceReminderLedger.PaymentReferencesCompatible(payment,act);
         }
         public ManualPaymentView GetManualPaymentView(string actId)
         { return GetManualPaymentView(actId,MonthlyServiceRuntime.Today); }

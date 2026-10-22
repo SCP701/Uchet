@@ -15,6 +15,12 @@ namespace WorkLedger
     public static class ServiceReminderLedger
     {
         internal static DateTime Date(string value){return DateTime.ParseExact(value,"yyyy-MM-dd",CultureInfo.InvariantCulture,DateTimeStyles.None);}
+        internal static bool PaymentReferencesCompatible(Record payment,Record act)
+        {
+            return new[]{"projectId","contractId"}.All(k=>payment.Get(k)==""||act.Get(k)==""||payment.Get(k)==act.Get(k));
+        }
+        private static string PaymentPurpose(Record payment)
+        { return String.IsNullOrWhiteSpace(payment.Get("bankPurpose"))?payment.Get("notes"):payment.Get("bankPurpose"); }
         public static List<ServiceBalance> Build(IEnumerable<Record> source,DateTime today)
         { return BuildBalances(source,today,false); }
         internal static ServiceBalance BalanceForAct(IEnumerable<Record> source,string actId,DateTime today)
@@ -33,7 +39,7 @@ namespace WorkLedger
             Record organization=snapshot.FirstOrDefault(r=>r.Kind=="settings"&&r.Get("archived")!="true");
             var matchesByPayment=new Dictionary<string,string>();
             foreach(var payment in receipts.Where(p=>p.Get("actId")==""&&p.Get("method")=="bank"&&accounting.For(p).Unallocated>0)) {
-                var matches=acts.Where(a=>a.Get("partyId")==payment.Get("partyId")&&a.Get("currency")==payment.Get("currency")&&a.Get("direction")==payment.Get("direction")&&(Store.IsExternalAct(a)?accounting.For(payment).GreyAmount:accounting.For(payment).WhiteAmount)>0&&PurposeMatches(String.IsNullOrWhiteSpace(payment.Get("bankPurpose"))?payment.Get("notes"):payment.Get("bankPurpose"),a.Get("number"))).Take(2).ToList();
+                var matches=acts.Where(a=>a.Get("partyId")==payment.Get("partyId")&&a.Get("currency")==payment.Get("currency")&&a.Get("direction")==payment.Get("direction")&&PaymentReferencesCompatible(payment,a)&&(Store.IsExternalAct(a)?accounting.For(payment).GreyAmount:accounting.For(payment).WhiteAmount)>0&&PurposeMatches(PaymentPurpose(payment),a.Get("number"))).Take(2).ToList();
                 matchesByPayment[payment.Id]=matches.Count==1?matches[0].Id:"";
             }
             foreach(Record act in acts.Where(r=>allActs||r.Get("serviceGenerated")=="true")) {
@@ -52,6 +58,12 @@ namespace WorkLedger
                     // A bank purpose matches only an explicit act number and exactly one compatible act.
                     string matched;
                     if(matchesByPayment.TryGetValue(payment.Id,out matched)&&matched!="") {if(matched==act.Id)balance.Paid+=split.Unallocated;continue;}
+                    if(!PaymentReferencesCompatible(payment,act)) {
+                        // An explicit act number conflicts with the saved contract/project even for an advance.
+                        // Payments clearly belonging elsewhere must not block this act without that number.
+                        if(PurposeMatches(PaymentPurpose(payment),act.Get("number")))balance.NeedsReview=true;
+                        continue;
+                    }
                     if(ServiceReminderLedger.Date(payment.Get("date"))>=ServiceReminderLedger.Date(act.Get("date")))
                         balance.NeedsReview=true;
                 }

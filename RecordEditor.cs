@@ -608,9 +608,7 @@ namespace WorkLedger
 
         private static bool TryDecimal(string value, out decimal result)
         {
-            string normalized = (value ?? "").Trim().Replace(" ", "").Replace("\u00A0", "").Replace("\u202F", "").Replace(',', '.');
-            return Decimal.TryParse(normalized, NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint,
-                CultureInfo.InvariantCulture, out result);
+            return NumericText.TryParse(value, NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint, out result);
         }
 
 
