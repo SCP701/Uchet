@@ -199,7 +199,7 @@ namespace WorkLedger
             string actTitle = externalActs ? "Акт вне № " : "Акт № ";
             number.Text = source == null ? actTitle + store.NextActNumber + " · номер при сохранении" : actTitle + source.Get("number");
             rate.Text = defaultRate > 0 ? defaultRate.ToString("N2") + " " + documentCurrency + " / час · по умолчанию" : "За час: укажите в строке работы";
-            var own = source == null ? store.Of("settings").FirstOrDefault() : Store.GetActSnapshot(source, "organizationSnapshot");
+            var own = source == null ? store.Of("settings").FirstOrDefault() : store.GetActOrganization(source);
             var cp = source != null && SelectedId(counterparty) == source.Get("partyId") ? Store.GetActSnapshot(source, "partySnapshot") : store.Find(SelectedId(counterparty));
             string ownName = own == null || own.Get("name") == "" ? "Укажите свою организацию в настройках" : own.Get("name");
             requisites.Text = "Исполнитель: " + ownName + (own == null || own.Get("unp") == "" ? "" : ". УНП " + own.Get("unp"))

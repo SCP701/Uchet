@@ -242,6 +242,61 @@ namespace WorkLedger
             }
             catch (Exception e) { throw new InvalidOperationException("Некорректный снимок реквизитов акта.", e); }
         }
+        public Record GetActOrganization(Record act)
+        {
+            Record snapshot = GetActSnapshot(act, "organizationSnapshot");
+            if (snapshot != null && !String.IsNullOrWhiteSpace(snapshot.Get("name"))) return snapshot;
+            Record current = Of("settings").FirstOrDefault();
+            return current != null && !String.IsNullOrWhiteSpace(current.Get("name")) ? current : snapshot ?? current;
+        }
+        public Record RefreshActRequisites(string id, long expectedRevision)
+        {
+            lock (gate)
+            {
+                if (Revision != expectedRevision) throw new InvalidOperationException("Данные изменились. Откройте акт заново и повторите действие.");
+                Record old = records.FirstOrDefault(r => r.Id == id && r.Kind == "act");
+                if (old == null) throw new InvalidOperationException("Акт не найден.");
+                Record own = records.FirstOrDefault(r => r.Kind == "settings" && r.Get("archived") != "true");
+                if (own == null || String.IsNullOrWhiteSpace(own.Get("name"))) throw new InvalidOperationException("Заполните название своей организации: «Меню → Настройки → Основные данные».");
+                Record party = records.FirstOrDefault(r => r.Id == old.Get("partyId") && r.Kind == "party");
+                if (party == null) throw new InvalidOperationException("Контрагент акта не найден.");
+                var serializer = new JavaScriptSerializer { MaxJsonLength = 100000, RecursionLimit = 20 };
+                Record updated = old.Clone();
+                updated.Set("organizationSnapshot", serializer.Serialize(own.Clone()));
+                updated.Set("partySnapshot", serializer.Serialize(party.Clone()));
+                if (updated.Get("organizationSnapshot") == old.Get("organizationSnapshot") && updated.Get("partySnapshot") == old.Get("partySnapshot")) return old.Clone();
+                List<Record> staged = records.Select(r => r.Id == id ? updated : r.Clone()).ToList();
+                Validate(staged); Commit(staged, MakeAudit("refresh-requisites", old, updated));
+                return updated.Clone();
+            }
+        }
+        public void CheckActDeletion(string id)
+        {
+            lock (gate)
+            {
+                Record act = records.FirstOrDefault(r => r.Id == id && r.Kind == "act");
+                if (act == null) throw new InvalidOperationException("Акт не найден.");
+                if (act.Get("serviceGenerated") == "true") throw new InvalidOperationException("Акт ежемесячного обслуживания нельзя удалить: он будет создан повторно. Измените его статус на «Отменён».");
+                if (act.Get("status") != "draft" && act.Get("status") != "cancelled") throw new InvalidOperationException("Удалить можно черновик или отменённый акт. Сначала отмените выставленный или подписанный акт.");
+                if (records.Any(r => r.Id != id && (LinkKeys.Any(k => r.Get(k) == id) || r.Get("manualConfirmedActId") == id)))
+                    throw new InvalidOperationException("Акт связан с оплатами, счетами или другими документами. Удаление остановлено; связанные записи нужно разобрать отдельно.");
+            }
+        }
+        public void DeleteAct(string id, long expectedRevision)
+        {
+            lock (gate)
+            {
+                if (Revision != expectedRevision) throw new InvalidOperationException("Данные изменились. Откройте акт заново и повторите действие.");
+                CheckActDeletion(id);
+                Record old = records.First(r => r.Id == id);
+                List<Record> staged = records.Select(r => r.Clone()).ToList();
+                var entries = new List<AuditEntry>();
+                StageActCounter(staged, entries);
+                staged.RemoveAll(r => r.Id == id);
+                entries.Add(MakeAudit("delete", old, null));
+                Validate(staged); Commit(staged, entries);
+            }
+        }
         public static List<HourlyActLine> GetHourlyActLines(Record act)
         {
             if (act == null || act.Get("workItems") == "") return new List<HourlyActLine>();
@@ -823,13 +878,15 @@ namespace WorkLedger
             {
                 case "create": return "Создано"; case "update": return "Изменено"; case "archive": return "В архив";
                 case "reconcile": return "Сверка дополнена";
+                case "refresh-requisites": return "Реквизиты обновлены"; case "delete": return "Удалено";
                 case "restore": return "Восстановлено"; case "import": return "Импортировано"; case "reverse": return "Сторнировано"; default: return action;
             }
         }
         private static AuditEntry MakeAudit(string action, Record before, Record after)
         {
-            string title = after.Get("number"); if (title == "") title = after.Get("name"); if (title == "") title = after.Get("title");
-            return new AuditEntry { Id = Guid.NewGuid().ToString("N"), Date = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture), Action = action, User = Environment.UserName, Kind = after.Kind, RecordId = after.Id, Summary = ActionLabel(action) + ": " + KindLabel(after.Kind) + (title == "" ? "" : " — " + title), Before = before == null ? "" : FieldsText(before), After = FieldsText(after) };
+            Record record = after ?? before;
+            string title = record.Get("number"); if (title == "") title = record.Get("name"); if (title == "") title = record.Get("title");
+            return new AuditEntry { Id = Guid.NewGuid().ToString("N"), Date = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture), Action = action, User = Environment.UserName, Kind = record.Kind, RecordId = record.Id, Summary = ActionLabel(action) + ": " + KindLabel(record.Kind) + (title == "" ? "" : " — " + title), Before = before == null ? "" : FieldsText(before), After = after == null ? "" : FieldsText(after) };
         }
         private static string FieldsText(Record r) { return String.Join("\r\n", r.Fields.OrderBy(p => p.Key).Select(p => FieldLabel(p.Key) + ": " + p.Value)); }
         private void Commit(List<Record> staged, AuditEntry entry) { Commit(staged, new List<AuditEntry> { entry }); }

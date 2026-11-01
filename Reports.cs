@@ -509,7 +509,7 @@ namespace WorkLedger
             if (act == null || act.Kind != "act") throw new ArgumentException("Выберите акт выполненных работ.");
             var document = new Document { Title = "Акт выполненных работ № " + act.Get("number") };
             document.Details["Дата"] = DateText(act.Get("date"));
-            var own = Store.GetActSnapshot(act, "organizationSnapshot") ?? store.Of("settings").FirstOrDefault();
+            var own = store.GetActOrganization(act);
             var party = Store.GetActSnapshot(act, "partySnapshot") ?? store.Find(act.Get("partyId"));
             var executor = act.Get("direction") == "expense" ? party : own;
             var customer = act.Get("direction") == "expense" ? own : party;

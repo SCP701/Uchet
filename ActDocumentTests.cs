@@ -27,6 +27,36 @@ namespace WorkLedger
                 L("Настройка печатной формы ведомости движения и выдачи материалов", 1, 70)
             };
             Record act = Act(party, "QA-500", "income", "BYN", 780); act.Set(ActDocument.ItemsField, ActDocument.SerializeItems(lines)); store.CaptureActSnapshots(act); store.Upsert(act); act = store.Find(act.Id);
+            test("organization filled after act creation repairs all exports without changing ledger", delegate {
+                var late = new Store(Path.Combine(folder, "late-organization"));
+                Record settings = R("settings", "name", "  ", "currency", "BYN"); late.Upsert(settings);
+                Record client = R("party", "name", "Заказчик поздних реквизитов", "role", "client"); late.Upsert(client);
+                Record saved = Act(client, "LATE-500", "income", "BYN", 175);
+                late.CaptureActSnapshots(saved); late.Upsert(saved); saved = late.Find(saved.Id);
+                string originalSnapshot = saved.Get("organizationSnapshot");
+                string word = Path.Combine(folder, "late-organization.docx");
+                File.WriteAllText(word, "original");
+                Reject(delegate { ActDocument.Export(late, saved, word); }); Eq(File.ReadAllText(word), "original");
+                settings.Set("name", "ИП Заполненный Позже"); settings.Set("bankAccount", "LATE-ACCOUNT"); late.Upsert(settings);
+                late = new Store(late.DataDir); saved = late.Find(saved.Id);
+                byte[] before = File.ReadAllBytes(late.DataPath); long revision = late.Revision;
+                string html = Path.Combine(folder, "late-organization.html"), excel = Path.Combine(folder, "late-organization.xlsx");
+                ActDocument.Export(late, saved, word);
+                ActHtmlDocument.WriteHtml(html, late, saved);
+                HourlyActDocuments.WriteXlsx(excel, late, saved);
+                string wordText = Document(word).InnerText, htmlText = File.ReadAllText(html);
+                True(wordText.Contains("ИП Заполненный Позже") && wordText.Contains("LATE-ACCOUNT") && wordText.Contains("175,00"));
+                True(htmlText.Contains("ИП Заполненный Позже") && htmlText.Contains("LATE-ACCOUNT"));
+                using (var zip = ZipFile.OpenRead(excel))
+                {
+                    string xml = String.Join("\n", zip.Entries.Where(e => e.FullName.EndsWith(".xml", StringComparison.Ordinal)).Select(e => { using (var reader = new StreamReader(e.Open())) return reader.ReadToEnd(); }));
+                    True(xml.Contains("ИП Заполненный Позже") && xml.Contains("LATE-ACCOUNT"));
+                }
+                Eq(late.Revision, revision); True(before.SequenceEqual(File.ReadAllBytes(late.DataPath)));
+                Eq(late.Find(saved.Id).Get("organizationSnapshot"), originalSnapshot);
+                Record corrupt = saved.Clone(); corrupt.Set("organizationSnapshot", "{invalid");
+                Reject(delegate { ActDocument.Export(late, corrupt, word); });
+            });
             test("rounded item sums and zero-price lines", delegate {
                 Eq(L("Округление", 2.005m, 1).Amount, 2.01m); Record rounding = Act(party, "ROUND", "income", "BYN", 2.01m); ActDocument.ValidateItems(rounding, new[] { L("Округление", 2.005m, 1), L("Бесплатное дополнение", 1, 0) });
                 Reject(delegate { ActDocument.ValidateItems(rounding, new[] { L("Округление", 2.004m, 1) }); });

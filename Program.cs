@@ -40,6 +40,7 @@ namespace WorkLedger
                     HourlyActDocumentTests.Run(Path.Combine(dataDir, "hourly-document-tests"));
                     ActItemsEditorTests.Run(Path.Combine(dataDir, "act-items-tests"));
                     ActDocumentTests.Run(Path.Combine(dataDir, "act-document-tests"));
+                    ActManagementTests.Run(Path.Combine(dataDir, "act-management-tests"));
                     ActHtmlDocumentTests.Run(Path.Combine(dataDir, "act-html-tests"));
                     PaymentAccountingTests.Run(Path.Combine(dataDir, "payment-scope-core-tests"));
                     GrayPaymentEditorTests.Run(Path.Combine(dataDir, "gray-payment-editor-tests"));

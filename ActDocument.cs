@@ -100,8 +100,8 @@ namespace WorkLedger
             string displaySummary;
             var lines = ActHtmlDocument.ReadDisplayRows(act, out displaySummary);
             if (String.IsNullOrWhiteSpace(path) || !Path.GetExtension(path).Equals(".docx", StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("Выберите файл Word с расширением .docx.");
-            Record own = Store.GetActSnapshot(act, "organizationSnapshot") ?? store.Of("settings").FirstOrDefault(), party = Store.GetActSnapshot(act, "partySnapshot") ?? store.Find(act.Get("partyId"));
-            if (own == null || String.IsNullOrWhiteSpace(own.Get("name"))) throw new InvalidOperationException("Заполните название своей организации в настройках перед созданием акта.");
+            Record own = store.GetActOrganization(act), party = Store.GetActSnapshot(act, "partySnapshot") ?? store.Find(act.Get("partyId"));
+            if (own == null || String.IsNullOrWhiteSpace(own.Get("name"))) throw new InvalidOperationException("Заполните название своей организации: «Меню → Настройки → Основные данные», затем повторите экспорт Word. Пересоздавать акт не нужно.");
             if (party == null || party.Kind != "party" || String.IsNullOrWhiteSpace(party.Get("name"))) throw new InvalidOperationException("Не найден контрагент акта.");
             if (act.Get("direction") != "income" && act.Get("direction") != "expense") throw new InvalidOperationException("Укажите направление оплаты акта.");
             Record executor = act.Get("direction") == "income" ? own : party, customer = act.Get("direction") == "income" ? party : own;

@@ -290,6 +290,7 @@ namespace WorkLedger
                 ClickConfirmation(dialog);Check(dialog.Payment!=null&&dialog.Payment.Id==receipt.Id&&f.Received()==120m,"existing-payment form workflow creates no duplicate funds");
             }
             f=new Fixture(root,"ui-commands",true);
+            new ServiceMailSettings{StartMonth="2026-10"}.Save(f.Dir,"");
             using(var window=new ServiceReminderWindow(f.Store,null))
             {
                 window.ShowInTaskbar=false;window.Opacity=0;window.Show();Application.DoEvents();

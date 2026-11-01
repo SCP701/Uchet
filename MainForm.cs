@@ -333,6 +333,7 @@ namespace WorkLedger
             if (Catalog.IsActSection(kind))
             {
                 operations.Add(Command("act-items", "Позиции акта", EditActItems, true));
+                operations.Add(Command("refresh-act-requisites", "Обновить реквизиты", RefreshSelectedActRequisites, true));
                 operations.Add(Command("confirm-payment", "Подтвердить оплату", ConfirmSelectedPayment, true));
             }
             if (Catalog.IsActSection(kind) || Catalog.IsPaymentSection(kind)) operations.Add(Command("allocate", "Зачесть оплату", Allocate));
@@ -340,6 +341,7 @@ namespace WorkLedger
             if (Catalog.IsActSection(kind)) operations.Add(Command("create-invoice", "Создать счёт", CreateInvoice, true));
             if (operations.Count > 0) operations.Add(null);
             operations.Add(Command("archive", "В архив / вернуть", Archive, true));
+            if (Catalog.IsActSection(kind)) operations.Add(Command("delete-act", "Удалить акт", DeleteSelectedAct, true));
             actions.Controls.Add(CommandMenu("record-actions", "Действия", operations.ToArray()));
 
             var documents = new List<MenuCommand>();
@@ -1018,6 +1020,16 @@ namespace WorkLedger
             if (r.Get("archived") == "true") { r.Fields["archived"] = "false"; store.Upsert(r); }
             else if (MessageBox.Show(this, "Перенести запись в архив? Связанные и финансовые данные сохраняются.", "Архив", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes) store.Archive(r.Id);
             RefillParties(); RefreshView(); if (r.Kind == "party") RefreshMonthlyServiceAutomation();
+        }
+        private void RefreshSelectedActRequisites()
+        {
+            Record act = Selected(); if (act == null || act.Kind != "act") return;
+            if (ActActions.RefreshRequisites(this, store, act.Id) != null) { RefreshView(); SelectId(act.Id); }
+        }
+        private void DeleteSelectedAct()
+        {
+            Record act = Selected(); if (act == null || act.Kind != "act") return;
+            if (ActActions.Delete(this, store, act.Id)) { RefillParties(); RefreshView(); }
         }
         private void Allocate()
         {

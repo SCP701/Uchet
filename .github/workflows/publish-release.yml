@@ -84,6 +84,9 @@ jobs:
 
           В установленном приложении откройте «Обновления» → «Проверить обновления». Подпись и контрольные суммы проверяются перед установкой; рабочая база хранится отдельно.
           NOTES
+            if [[ -f "release-notes/$tag.md" ]]; then
+              cp "release-notes/$tag.md" "$RUNNER_TEMP/release-notes.txt"
+            fi
             gh release create "$tag" "${assets[@]}" --repo "$GH_REPO" \
               --target "$GITHUB_SHA" --title "Акты и оплаты $RELEASE_VERSION" \
               --notes-file "$RUNNER_TEMP/release-notes.txt" --latest

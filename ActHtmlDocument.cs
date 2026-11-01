@@ -106,7 +106,7 @@ namespace WorkLedger
             if (act.Get("direction") != "income" && act.Get("direction") != "expense") throw new InvalidOperationException("Укажите направление оплаты акта.");
             if (displayRows == null) throw new InvalidOperationException("Не указан перечень операций акта.");
             var rows = displayRows.ToList(); ValidateRows(rows, total);
-            var own = Store.GetActSnapshot(act, "organizationSnapshot") ?? store.Of("settings").FirstOrDefault();
+            var own = store.GetActOrganization(act);
             var party = Store.GetActSnapshot(act, "partySnapshot") ?? store.Find(act.Get("partyId"));
             var executor = act.Get("direction") == "expense" ? party : own; var customer = act.Get("direction") == "expense" ? own : party;
             string units = currency == "USD" ? "долл. США" : currency == "EUR" ? "евро" : "руб.";

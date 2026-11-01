@@ -157,6 +157,28 @@ namespace WorkLedger
                 ForeColor = Color.FromArgb(100, 116, 139), Font = new Font("Segoe UI", 9F), MaximumSize = new Size(940, 0) };
             metadata.Controls.Add(actRequisites); actRequisites.BringToFront();
             dataPage.Controls.Add(metadata); sections.TabPages.Add(dataPage);
+            if (store.Find(source.Id) != null)
+            {
+                var commands = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 53, Padding = new Padding(16, 5, 16, 5), WrapContents = false };
+                var refresh = new UiButton { Text = "Обновить реквизиты", Name = "refreshActRequisites", AutoSize = true, MinimumSize = new Size(190, 36) };
+                refresh.Click += delegate
+                {
+                    try
+                    {
+                        if (SelectedActValue("partyId") != source.Get("partyId")) throw new InvalidOperationException("Сначала сохраните смену контрагента, затем обновите реквизиты.");
+                        Record updated = ActActions.RefreshRequisites(this, store, source.Id);
+                        if (updated != null) { source.Set("partySnapshot", updated.Get("partySnapshot")); source.Set("organizationSnapshot", updated.Get("organizationSnapshot")); UpdateActRequisites(); }
+                    }
+                    catch (Exception e) { MessageBox.Show(this, e.Message, "Не удалось обновить реквизиты", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
+                };
+                var delete = new UiButton { Text = "Удалить акт", Name = "deleteAct", AutoSize = true, MinimumSize = new Size(125, 36) };
+                delete.Click += delegate
+                {
+                    try { if (ActActions.Delete(this, store, source.Id)) { ResultRecord = source.Clone(); DialogResult = DialogResult.OK; Close(); } }
+                    catch (Exception e) { MessageBox.Show(this, e.Message, "Не удалось удалить акт", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
+                };
+                commands.Controls.Add(refresh); commands.Controls.Add(delete); dataPage.Controls.Add(commands);
+            }
             var notesPage = new TabPage("Примечание") { BackColor = BackColor, Padding = new Padding(18, 15, 18, 15) };
             var notes = (TextBox)MakeInput(schema.Fields.Single(field => field.Key == "notes")); notes.Dock = DockStyle.Fill; notes.MaxLength = 32767;
             inputs.Add("notes", notes); notesPage.Controls.Add(notes);
@@ -289,7 +311,7 @@ namespace WorkLedger
             bool preserveSnapshots = store.Find(source.Id) != null && partyId == source.Get("partyId") && source.Get("partySnapshot") != "";
             Record party = preserveSnapshots ? Store.GetActSnapshot(source, "partySnapshot") : null;
             if (party == null) party = store.Find(partyId);
-            Record own = preserveSnapshots ? Store.GetActSnapshot(source, "organizationSnapshot") : null;
+            Record own = preserveSnapshots ? store.GetActOrganization(source) : null;
             if (own == null) own = store.Of("settings").FirstOrDefault();
             actRequisites.Text = "Реквизиты для документа\r\n" + RequisitesLine(own, "Моя организация") + "\r\n" + RequisitesLine(party, "Контрагент");
             actRequisites.MaximumSize = new Size(Math.Max(600, ClientSize.Width - 60), 0);

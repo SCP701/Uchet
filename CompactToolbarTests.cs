@@ -87,7 +87,7 @@ namespace WorkLedger
                         {
                             RequireCommands(panel,new[]{"+ Добавить","Изменить","В архив / вернуть","Excel / CSV","Импорт"},route);
                             if(Catalog.IsActSection(route))
-                                RequireCommands(panel,new[]{"Позиции акта","Зачесть оплату","Создать счёт","Печатная форма","Акт Word","Акт в Excel","Прикрепить файл",route==Catalog.ExternalActSection?"Все акты вне":"Все акты"},route);
+                                RequireCommands(panel,new[]{"Позиции акта","Обновить реквизиты","Удалить акт","Зачесть оплату","Создать счёт","Печатная форма","Акт Word","Акт в Excel","Прикрепить файл",route==Catalog.ExternalActSection?"Все акты вне":"Все акты"},route);
                             if(Catalog.IsPaymentSection(route))RequireCommands(panel,new[]{"Зачесть оплату","Прикрепить файл"},route);
                             if(route=="estimate")RequireCommands(panel,new[]{"Создать акт","Печатная форма","Прикрепить файл"},route);
                             if(route=="contract"||route=="invoice")RequireCommands(panel,new[]{"Печатная форма","Прикрепить файл"},route);
@@ -104,6 +104,7 @@ namespace WorkLedger
                 grid.ClearSelection();grid.CurrentCell=null;
                 foreach(var menu in actions.Controls.OfType<Button>().Where(b=>b.ContextMenuStrip!=null).Select(b=>b.ContextMenuStrip))RefreshMenu(menu);
                 Assert(!FindCommand(actions,"archive").Enabled&&!FindCommand(actions,"act-word").Enabled&&!FindCommand(actions,"attach").Enabled,"selected-record commands enabled without a record");
+                Assert(!FindCommand(actions,"refresh-act-requisites").Enabled&&!FindCommand(actions,"delete-act").Enabled,"act management requires a selected record");
                 Assert(FindCommand(actions,"export").Enabled&&FindCommand(actions,"import").Enabled&&FindCommand(actions,"allocate").Enabled,"general commands incorrectly disabled");
                 grid.CurrentCell=grid.Rows[0].Cells[0];grid.Rows[0].Selected=true;
                 foreach(var menu in actions.Controls.OfType<Button>().Where(b=>b.ContextMenuStrip!=null).Select(b=>b.ContextMenuStrip))RefreshMenu(menu);
