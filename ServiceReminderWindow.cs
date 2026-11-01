@@ -16,7 +16,7 @@ namespace WorkLedger
         private readonly Icon applicationIcon;
         private ServiceMailSettings settings;
         private readonly TabControl tabs=new TabControl();
-        private readonly DataGridView plansGrid=new DataGridView(),historyGrid=new DataGridView();
+        private readonly DataGridView plansGrid=new ResizableDataGridView(),historyGrid=new ResizableDataGridView();
         private readonly Label summary=new Label(),mailInfo=new Label();
         private readonly CheckBox enabled=new CheckBox{Text="Отправлять напоминания об оплате автоматически",AutoSize=true};
         private readonly CheckBox tls=new CheckBox{Text="Защищённое соединение (STARTTLS)",AutoSize=true};
@@ -50,6 +50,8 @@ namespace WorkLedger
             plansGrid.SelectionChanged+=delegate{var plan=SelectedPlan();confirmPayment.Enabled=plan!=null&&plan.Balance.Due>0;};
             commands.Dock=DockStyle.Bottom;listPage.Controls.Add(commands);
             ConfigureGrid(plansGrid);ConfigureGrid(historyGrid);
+            UiStyle.BindColumnPreferences(plansGrid,store.DataDir,"service-payments");
+            UiStyle.BindColumnPreferences(historyGrid,store.DataDir,"service-mail-history");
             historyPage.Controls.Add(historyGrid);
             var historyCommands=Strip();historyCommands.Dock=DockStyle.Bottom;
             historyCommands.Controls.Add(MakeButton("Обновить",RefreshLists));

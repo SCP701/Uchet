@@ -88,7 +88,7 @@ namespace WorkLedger
             grid.EnableHeadersVisualStyles = false;
             grid.GridColor = Color.FromArgb(233, 238, 244);
             grid.CellBorderStyle = DataGridViewCellBorderStyle.SingleHorizontal;
-            grid.ColumnHeadersBorderStyle = DataGridViewHeaderBorderStyle.None;
+            grid.ColumnHeadersBorderStyle = DataGridViewHeaderBorderStyle.Single;
             grid.ColumnHeadersDefaultCellStyle.BackColor = Color.FromArgb(235, 241, 249);
             grid.ColumnHeadersDefaultCellStyle.ForeColor = Ink;
             if (!FontMatches(grid.ColumnHeadersDefaultCellStyle.Font, 10F, FontStyle.Bold))
@@ -105,6 +105,12 @@ namespace WorkLedger
             grid.DefaultCellStyle.SelectionForeColor = Ink;
             grid.AlternatingRowsDefaultCellStyle.BackColor = Color.FromArgb(249, 251, 254);
             grid.RowTemplate.Height = Math.Max(38, grid.RowTemplate.Height);
+        }
+        internal static void BindColumnPreferences(Control root, string dataDir, string scope)
+        {
+            var grid = root as ResizableDataGridView;
+            if (grid != null) grid.BindPreferences(dataDir, scope);
+            for (int i = 0; i < root.Controls.Count; i++) BindColumnPreferences(root.Controls[i], dataDir, scope + "/" + i);
         }
         private static bool FontMatches(Font font, float size, FontStyle style)
         {

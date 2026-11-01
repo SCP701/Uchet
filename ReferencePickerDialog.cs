@@ -89,7 +89,7 @@ namespace WorkLedger
             else if (roleFilter.Visible && !statusFilter.Visible) filters.SetColumnSpan(roleFilter, 2);
             archiveFilter.Checked = rows.Any(r => r.Record.Id == currentId && r.Record.Get("archived") == "true");
             count = new Label { Name = "picker-count", AccessibleName = "Результаты поиска", Dock = DockStyle.Top, Height = 28, ForeColor = UiStyle.Muted };
-            ResultGrid = new DataGridView { Name = "picker-results", AccessibleName = "Доступные записи", Dock = DockStyle.Fill,
+            ResultGrid = new ResizableDataGridView { Name = "picker-results", AccessibleName = "Доступные записи", Dock = DockStyle.Fill,
                 ReadOnly = true, AllowUserToAddRows = false, AllowUserToDeleteRows = false, AllowUserToResizeRows = false,
                 RowHeadersVisible = false, MultiSelect = false, SelectionMode = DataGridViewSelectionMode.FullRowSelect,
                 AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill, AutoGenerateColumns = false };
@@ -125,6 +125,7 @@ namespace WorkLedger
             Resize += delegate { details.Height = Math.Max(64, Math.Min(124, Height - 530)); };
             details.Height = Math.Max(64, Math.Min(124, Height - 530));
             UiStyle.ApplyTo(this);
+            UiStyle.BindColumnPreferences(ResultGrid, store.DataDir, "reference-picker:" + kind);
             loading = false; SearchBox.Text = initialQuery; searchDelay.Stop(); RefreshResults();
             if (initialQuery == "") SelectRow(currentId);
             Shown += delegate { SearchBox.Focus(); SearchBox.SelectionStart = SearchBox.TextLength; };
@@ -134,6 +135,19 @@ namespace WorkLedger
         {
             return new ComboBox { Name = name, AccessibleName = label, Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList,
                 Margin = new Padding(0, 7, 10, 6), IntegralHeight = false, DropDownHeight = 180 };
+        }
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            if (keyData == (Keys.Control | Keys.F)) { SearchBox.Focus(); SearchBox.SelectAll(); return true; }
+            if (keyData == Keys.Escape && SearchBox.Focused && SearchBox.TextLength > 0)
+            { SearchBox.Clear(); searchDelay.Stop(); RefreshResults(); return true; }
+            if (keyData == Keys.Down && SearchBox.Focused)
+            {
+                searchDelay.Stop(); RefreshResults();
+                if (ResultGrid.Rows.Count > 0) ResultGrid.Focus();
+                return true;
+            }
+            return base.ProcessCmdKey(ref msg, keyData);
         }
         private void BuildFilter(ComboBox combo, string title, string key, IEnumerable<string> values)
         {

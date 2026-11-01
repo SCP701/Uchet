@@ -11,7 +11,7 @@ namespace WorkLedger
     {
         private readonly Record source;
         private readonly TextBox amountInput, descriptionInput, hoursInput;
-        private readonly DataGridView items = new DataGridView();
+        private readonly DataGridView items = new ResizableDataGridView();
         private readonly CheckBox manualPricing = new CheckBox();
         private readonly Button fullDescription = new UiButton();
         private readonly TextBox caption = new TextBox();

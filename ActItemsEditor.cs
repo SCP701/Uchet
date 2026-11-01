@@ -11,7 +11,7 @@ namespace WorkLedger
     {
         private readonly Store store;
         private readonly Record source;
-        private readonly DataGridView items = new DataGridView();
+        private readonly DataGridView items = new ResizableDataGridView();
         private readonly TextBox description = new TextBox();
         private readonly Label total = new Label();
         private readonly Label status = new Label();
@@ -26,6 +26,7 @@ namespace WorkLedger
         {
             if (store == null || act == null || act.Kind != "act") throw new ArgumentException("Выберите акт для редактирования позиций.");
             this.store = store;
+            UiStyle.BindColumnPreferences(items, store.DataDir, "act-items-editor");
             source = act.Clone();
             Text = "Позиции акта № " + source.Get("number");
             Font = new Font("Segoe UI", 10);

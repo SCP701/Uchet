@@ -12,7 +12,7 @@ namespace WorkLedger
     {
         private readonly Store store;
         private readonly Action<Record> openRecord;
-        private readonly DataGridView grid = new DataGridView();
+        private readonly DataGridView grid = new ResizableDataGridView();
         private readonly ComboBox filter = new ComboBox();
         private readonly TextBox detail = new TextBox();
         private readonly Label summary = new Label();
@@ -48,6 +48,7 @@ namespace WorkLedger
             var content = new Panel { Dock = DockStyle.Fill, Padding = new Padding(18, 0, 18, 0) }; content.Controls.Add(grid);
             Controls.Add(content); Controls.Add(footer); Controls.Add(commands); Controls.Add(header);
             UiStyle.ApplyTo(this); Reload();
+            UiStyle.BindColumnPreferences(grid, store.DataDir, "reconciliation-review");
         }
         private Button MakeButton(string text, Action action, int width)
         {
@@ -154,7 +155,7 @@ namespace WorkLedger
             Font = new Font("Segoe UI", 10F); BackColor = UiStyle.Background; ShowIcon = false; ShowInTaskbar = false;
             var top = new Label { Dock = DockStyle.Top, Height = 84, Padding = new Padding(18, 12, 18, 0),
                 Text = plan.Title + "\r\nНовых записей: " + plan.NewCount + " · Дополнений: " + plan.ExistingCount + " · Пользовательских изменений: " + plan.ConflictCount + "\r\nСуществующие суммы и статусы сохраняются. Оплаты не зачитываются автоматически." };
-            var grid = new DataGridView { Dock = DockStyle.Fill, ReadOnly = true, AllowUserToAddRows = false, RowHeadersVisible = false,
+            var grid = new ResizableDataGridView { Dock = DockStyle.Fill, ReadOnly = true, AllowUserToAddRows = false, RowHeadersVisible = false,
                 AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill, BackgroundColor = Color.White, SelectionMode = DataGridViewSelectionMode.FullRowSelect };
             foreach (string label in new[] { "Изменение", "Раздел", "Документ", "Контрагент", "Сумма", "Валюта", "Проверка" }) grid.Columns.Add(label, label);
             foreach (Record record in plan.Records)
@@ -168,6 +169,7 @@ namespace WorkLedger
             var load = new UiButton { Text = "Загрузить", Primary = true, DialogResult = DialogResult.OK, Width = 150, Height = 36 };
             bottom.Controls.Add(cancel); bottom.Controls.Add(load); Controls.Add(grid); Controls.Add(bottom); Controls.Add(top); AcceptButton = load; CancelButton = cancel;
             UiStyle.ApplyTo(this);
+            UiStyle.BindColumnPreferences(grid, store.DataDir, "reconciliation-preview");
         }
     }
 }

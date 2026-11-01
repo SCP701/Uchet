@@ -51,6 +51,7 @@ namespace WorkLedger
                     UiPreferencesTests.Run(Path.Combine(dataDir, "ui-preferences-tests"));
                     InterfaceUiTests.Run(Path.Combine(dataDir, "interface-ui-tests"));
                     ListLayoutTests.Run(Path.Combine(dataDir, "list-layout-tests"));
+                    ColumnResizeTests.Run(Path.Combine(dataDir, "column-resize-tests"));
                     UiStyleTests.Run();
                     CompactToolbarTests.Run(Path.Combine(dataDir, "compact-toolbar-tests"));
                     FilterTests.Run(Path.Combine(dataDir, "filter-tests"));

@@ -119,6 +119,7 @@ namespace WorkLedger
             };
             save.FlatAppearance.BorderSize = 0;
             save.Click += SaveClick;
+            tips.SetToolTip(save, "Сохранить карточку (Ctrl+S)");
             buttons.Controls.Add(cancel);
             buttons.Controls.Add(save);
             hint = new Label
@@ -134,6 +135,7 @@ namespace WorkLedger
             Controls.Add(header);
             WirePaymentFields();
             UiStyle.ApplyTo(this); UiStyle.SetAnimations(this, UiPreferences.Load(store.DataDir).AnimationsEnabled);
+            UiStyle.BindColumnPreferences(this, store.DataDir, "record-editor:" + schema.Kind);
             AcceptButton = save;
             CancelButton = cancel;
             Shown += delegate { if (schema.Kind == "act") inputs["partyId"].Focus(); else if (inputs.Count > 0) inputs.Values.First().Focus(); };
@@ -760,6 +762,11 @@ namespace WorkLedger
         {
             if (disposing) { errors.Dispose(); tips.Dispose(); }
             base.Dispose(disposing);
+        }
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            if (keyData == (Keys.Control | Keys.S)) { if (save.Enabled) save.PerformClick(); return true; }
+            return base.ProcessCmdKey(ref msg, keyData);
         }
     }
 }

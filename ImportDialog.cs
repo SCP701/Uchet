@@ -116,7 +116,7 @@ namespace WorkLedger
             }
             mappingScroll.Controls.Add(mappingTable);
             split.Panel1.Controls.Add(mappingScroll);
-            DataGridView preview = new DataGridView
+            DataGridView preview = new ResizableDataGridView
             {
                 Dock = DockStyle.Fill, ReadOnly = true, AllowUserToAddRows = false, AllowUserToDeleteRows = false,
                 AutoGenerateColumns = false, BackgroundColor = Color.White, BorderStyle = BorderStyle.FixedSingle,
@@ -126,6 +126,7 @@ namespace WorkLedger
             preview.ColumnHeadersDefaultCellStyle.BackColor = Color.FromArgb(235, 240, 249);
             preview.ColumnHeadersDefaultCellStyle.Font = new Font(Font, FontStyle.Bold);
             preview.EnableHeadersVisualStyles = false;
+            UiStyle.BindColumnPreferences(preview, store.DataDir, "import-preview:" + schema.Kind);
             foreach (string column in columns) preview.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = column, Width = 145, SortMode = DataGridViewColumnSortMode.NotSortable });
             for (int i = 0; i < Math.Min(100, this.incoming.Count); ++i)
             {

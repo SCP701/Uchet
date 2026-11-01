@@ -29,7 +29,7 @@ namespace WorkLedger
         private Panel body = new Panel();
         private FlowLayoutPanel nav = new FlowLayoutPanel(), actions = new FlowLayoutPanel();
         private Label title = new Label(), hint = new Label(), count = new Label();
-        private DataGridView grid = new DataGridView();
+        private DataGridView grid = new ResizableDataGridView();
         private TextBox search = new TextBox();
         private ComboBox project = new ComboBox(), status = new ComboBox(), period = new ComboBox();
         private System.Windows.Forms.Button resetFiltersButton;
@@ -52,6 +52,7 @@ namespace WorkLedger
         private readonly ViewTransition viewTransition = new ViewTransition();
         private readonly Icon applicationIcon;
         private string current = "overview";
+        private string lastGridView;
         private bool refreshing;
         private TableData table = new TableData();
         private static readonly Color Ink = UiStyle.Ink, Accent = UiStyle.Accent, Background = UiStyle.Background;
@@ -135,11 +136,18 @@ namespace WorkLedger
             currency.AccessibleName = "Фильтр валюты"; direction.AccessibleName = "Направление расчётов";
             from.AccessibleName = "Начало периода"; to.AccessibleName = "Конец периода";
             archived.Text = "Показывать архив"; archived.AutoSize = true; archived.Tag = "filter:archive"; archived.Margin = new Padding(6, 6, 0, 0);
-            filterTips.SetToolTip(search, "Все слова запроса ищутся в записи, примечаниях и связанных документах. Регистр и ё/е не важны.");
+            filterTips.SetToolTip(search, "Все слова запроса ищутся в записи, примечаниях и связанных документах. Регистр и ё/е не важны. Ctrl+F — найти, Esc — очистить поиск.");
             filterTips.SetToolTip(from, "Выберите начальную дату или включите галочку. Указанный день входит в период. Снимите галочку, чтобы убрать начальную границу.");
             filterTips.SetToolTip(to, "Выберите конечную дату или включите галочку. Указанный день входит в период. Снимите галочку, чтобы убрать конечную границу.");
             filterTips.SetToolTip(archived, "Показывает действующие и архивные записи. Архив не исключается из финансовых отчётов.");
-            AddFilter(filters, "Поиск", search, "search"); AddFilter(filters, "Валюта", currency, "currency");
+            var searchArea = new Panel { Width = 257, Height = 29 };
+            search.Location = new Point(0, 2);
+            var clearSearch = new UiButton { Name = "clearSearch", Text = "×", AccessibleName = "Очистить поиск", MinimumSize = Size.Empty, Width = 28, Height = 28, Left = 229, Top = 0, Padding = Padding.Empty, TextAlign = ContentAlignment.MiddleCenter, Enabled = false };
+            clearSearch.Click += delegate { search.Clear(); search.Focus(); };
+            search.TextChanged += delegate { clearSearch.Enabled = search.TextLength > 0; };
+            filterTips.SetToolTip(clearSearch, "Очистить поиск (Esc)");
+            searchArea.Controls.Add(search); searchArea.Controls.Add(clearSearch);
+            AddFilter(filters, "Поиск", searchArea, "search"); AddFilter(filters, "Валюта", currency, "currency");
             AddFilter(filters, "Контрагент", party, "party"); AddFilter(filters, "Объект", project, "project");
             AddFilter(filters, "Направление", direction, "direction"); AddFilter(filters, "Состояние", status, "status");
             AddFilter(filters, "Период", period, "dates"); AddFilter(filters, "С", from, "dates"); AddFilter(filters, "По", to, "dates"); filters.Controls.Add(archived);
@@ -159,9 +167,11 @@ namespace WorkLedger
             grid.Dock = DockStyle.Fill; grid.ReadOnly = true; grid.AllowUserToAddRows = false; grid.AllowUserToDeleteRows = false;
             grid.RowHeadersVisible = false; grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect; grid.MultiSelect = false;
             grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill; UiStyle.ApplyGrid(grid);
+            UiStyle.BindColumnPreferences(grid, store.DataDir, "main-list");
             grid.SizeChanged += delegate { LedgerGridLayout.Apply(grid, current, report.SelectedIndex); };
             grid.SortCompare += CompareDates;
             grid.CellDoubleClick += delegate(object sender, DataGridViewCellEventArgs e) { if (e.RowIndex >= 0) Edit(); };
+            grid.AccessibleDescription = "Enter или F2 — открыть карточку. Перетащите границу заголовка, чтобы изменить ширину; правый щелчок — настройки столбцов.";
             overview.Dock = DockStyle.Fill; overview.AutoScroll = true; overview.BackColor = Background;
             count.Dock = DockStyle.Bottom; count.Height = 27; count.AutoEllipsis = true; count.ForeColor = UiStyle.Muted; count.Font = new Font("Segoe UI", 9);
             body.Controls.Add(grid); body.Controls.Add(overview); body.Controls.Add(count); body.Controls.Add(filters); body.Controls.Add(actions); body.Controls.Add(header);
@@ -645,6 +655,11 @@ namespace WorkLedger
         {
             if (keyData == (Keys.Control | Keys.F) && FilterAvailable("search")) { search.Focus(); search.SelectAll(); return true; }
             if (keyData == (Keys.Control | Keys.Shift | Keys.R) && FilterAvailable("reset")) { ResetFilters(); return true; }
+            if (keyData == Keys.Escape && search.Focused && search.Text.Length > 0) { search.Clear(); return true; }
+            if (keyData == Keys.F5 && !IsActComposerSection(current)) { Guard(RefreshView); return true; }
+            if ((keyData == Keys.Enter || keyData == Keys.F2) && grid.Focused && grid.CurrentRow != null) { Guard(Edit); return true; }
+            if (keyData == (Keys.Control | Keys.S) && composer != null && composer.Visible)
+            { Guard(delegate { composer.SaveDraft(); }); return true; }
             return base.ProcessCmdKey(ref msg, keyData);
         }
         public void Navigate(string kind)
@@ -871,6 +886,13 @@ namespace WorkLedger
         public void RefreshView()
         {
             if (refreshing || party.Items.Count == 0 || IsActComposerSection(current)) return;
+            string viewKey = current + (current == "reports" ? ":" + report.SelectedIndex : "");
+            bool sameView = lastGridView == viewKey;
+            string selectedId = sameView && grid.CurrentRow != null ? Convert.ToString(grid.CurrentRow.Tag) : "";
+            string selectedHeader = sameView && grid.CurrentCell != null ? grid.CurrentCell.OwningColumn.HeaderText : "";
+            string topId = sameView && grid.FirstDisplayedScrollingRowIndex >= 0 ? Convert.ToString(grid.Rows[grid.FirstDisplayedScrollingRowIndex].Tag) : "";
+            int horizontalOffset = sameView ? grid.HorizontalScrollingOffset : 0;
+            lastGridView = viewKey;
             if (current == "taxes")
             {
                 grid.Columns.Clear(); grid.Rows.Clear(); table = new TableData { Title = "Налоги" };
@@ -883,7 +905,7 @@ namespace WorkLedger
             var manualActs=new HashSet<string>(viewRecords.Where(r=>r.Get("manualPaymentConfirmed")=="true").Select(r=>r.Get("manualConfirmedActId")));
             viewManualBalances=manualActs.Count==0?new Dictionary<string,ServiceBalance>():ServiceReminderLedger.BuildBalances(viewRecords,MonthlyServiceRuntime.Today,true).Where(b=>manualActs.Contains(b.Act.Id)).ToDictionary(b=>b.Act.Id);
             UpdateDateFilterDisplay();
-            string sortedDateHeader = grid.SortedColumn != null && (Object.Equals(grid.SortedColumn.Tag, "date") || LedgerGridLayout.IsNumericColumn(grid.SortedColumn)) ? grid.SortedColumn.HeaderText : null;
+            string sortedDateHeader = sameView && grid.SortedColumn != null ? grid.SortedColumn.HeaderText : null;
             ListSortDirection dateSortDirection = grid.SortOrder == SortOrder.Descending ? ListSortDirection.Descending : ListSortDirection.Ascending;
             if (FilterAvailable("dates") && from.Checked && to.Checked && from.Value.Date > to.Value.Date)
             {
@@ -955,9 +977,22 @@ namespace WorkLedger
             LedgerGridLayout.Apply(grid, current, report.SelectedIndex);
             if (sortedDateHeader != null)
             {
-                var column = grid.Columns.Cast<DataGridViewColumn>().FirstOrDefault(c => c.HeaderText == sortedDateHeader && (Object.Equals(c.Tag, "date") || LedgerGridLayout.IsNumericColumn(c)));
+                var column = grid.Columns.Cast<DataGridViewColumn>().FirstOrDefault(c => c.HeaderText == sortedDateHeader && c.SortMode != DataGridViewColumnSortMode.NotSortable);
                 if (column != null) grid.Sort(column, dateSortDirection);
             }
+            if (selectedId != "")
+            {
+                SelectId(selectedId);
+                var selectedColumn = grid.Columns.Cast<DataGridViewColumn>().FirstOrDefault(c => c.Visible && c.HeaderText == selectedHeader);
+                if (grid.CurrentRow != null && Convert.ToString(grid.CurrentRow.Tag) == selectedId && selectedColumn != null)
+                    grid.CurrentCell = grid.CurrentRow.Cells[selectedColumn.Index];
+            }
+            if (topId != "")
+            {
+                var top = grid.Rows.Cast<DataGridViewRow>().FirstOrDefault(row => Convert.ToString(row.Tag) == topId);
+                if (top != null) grid.FirstDisplayedScrollingRowIndex = top.Index;
+            }
+            if (horizontalOffset > 0) grid.HorizontalScrollingOffset = Math.Min(horizontalOffset, Math.Max(0, LedgerGridLayout.VisibleColumnsWidth(grid) - LedgerGridLayout.AvailableWidth(grid)));
             count.Text = (visible == 0 ? "Нет записей по выбранным фильтрам. Нажмите «Сбросить», чтобы начать заново." : "Строк: " + visible)
                 + (FilterAvailable("currency") ? "    ·    " + (Curr == "Все валюты" ? Curr : "Валюта: " + Curr) : "")
                 + (FilterAvailable("dates") ? "    ·    " + PeriodText() : "");

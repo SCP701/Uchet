@@ -115,12 +115,13 @@ namespace WorkLedger
                 Font = OwnFont(12, FontStyle.Bold), TextAlign = ContentAlignment.MiddleLeft, Margin = new Padding(0) }, 0, 0);
             var gridHost = new Panel { Dock = DockStyle.Fill, Margin = new Padding(0), BackColor = UiStyle.Surface };
             detailLayout.Controls.Add(gridHost, 0, 1);
-            payments = new DataGridView { Name = "taxPaymentsGrid", Dock = DockStyle.Fill, ReadOnly = true,
+            payments = new ResizableDataGridView { Name = "taxPaymentsGrid", Dock = DockStyle.Fill, ReadOnly = true,
                 AllowUserToAddRows = false, AllowUserToDeleteRows = false, AllowUserToResizeRows = false,
                 RowHeadersVisible = false, SelectionMode = DataGridViewSelectionMode.FullRowSelect, MultiSelect = false,
                 AutoGenerateColumns = false, AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
                 ClipboardCopyMode = DataGridViewClipboardCopyMode.EnableAlwaysIncludeHeaderText, AccessibleName = "Входящие оплаты за выбранный период" };
             UiStyle.ApplyGrid(payments);
+            UiStyle.BindColumnPreferences(payments, store.DataDir, "tax-payments");
             payments.DefaultCellStyle.FormatProvider = Russian;
             AddColumn("date", "Дата", 13, 99, typeof(DateTime)); payments.Columns["date"].DefaultCellStyle.Format = "dd.MM.yyyy";
             AddColumn("number", "Номер", 16, 108, typeof(string));

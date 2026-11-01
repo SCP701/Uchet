@@ -20,7 +20,7 @@ namespace WorkLedger
         private readonly ComboBox counterparty = new ReferencePickerCombo(), contract = new ReferencePickerCombo(), status = new ComboBox();
         private readonly DateTimePicker date = new DateTimePicker(), due = new DateTimePicker();
         private readonly Label number = new Label(), rate = new Label(), requisites = new Label(), totals = new Label();
-        private readonly DataGridView works = new DataGridView();
+        private readonly DataGridView works = new ResizableDataGridView();
         private readonly HashSet<DataGridViewRow> customRateRows = new HashSet<DataGridViewRow>();
         private TextBox activeEditor;
         private DataGridViewCell activeCell;
@@ -152,6 +152,7 @@ namespace WorkLedger
                 foreach (HourlyActLine line in Store.GetHourlyActLines(source)) works.Rows.Add(line.Description, line.Hours, line.Rate, line.Amount);
             }
             loading = false; FillContracts(); RefreshDetails(); UpdateTotals(); UiStyle.ApplyTo(this);
+            UiStyle.BindColumnPreferences(works, store.DataDir, "hourly-act-works");
         }
         private Label FieldLabel(string text) { return new Label { Text = text, AutoSize = true, Margin = new Padding(0, 12, 8, 4) }; }
         private static string SelectedId(ComboBox input) { Option option = input.SelectedItem as Option; return option == null ? "" : option.Id; }

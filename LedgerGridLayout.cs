@@ -17,6 +17,8 @@ namespace WorkLedger
             public Font Font;
             public bool Dirty = true;
             public float Dpi;
+            public string Section;
+            public int ReportIndex;
         }
 
         private static readonly Dictionary<DataGridView, LayoutState> States = new Dictionary<DataGridView, LayoutState>();
@@ -140,6 +142,8 @@ namespace WorkLedger
             LayoutState state;
             if (States.TryGetValue(grid, out state)) return state;
             state = new LayoutState(); States.Add(grid, state);
+            var resizable = grid as ResizableDataGridView;
+            if (resizable != null) resizable.ColumnWidthsReset += delegate { Apply(grid, state.Section, state.ReportIndex); };
             grid.Disposed += delegate { States.Remove(grid); };
             grid.CellValueChanged += delegate { state.Dirty = true; };
             grid.RowsAdded += delegate { state.Dirty = true; };
@@ -163,6 +167,9 @@ namespace WorkLedger
             if (grid == null || grid.IsDisposed || grid.Columns.Count == 0 || AvailableWidth(grid) < 150) return;
             LayoutState state = State(grid);
             if (state.Applying) return;
+            state.Section = section; state.ReportIndex = reportIndex;
+            var resizable = grid as ResizableDataGridView;
+            if (resizable != null) resizable.SetLayoutContext(section + (section == "reports" ? ":" + reportIndex : ""));
             state.Applying = true; grid.SuspendLayout();
             try
             {
@@ -199,13 +206,15 @@ namespace WorkLedger
                 if (grid.CurrentCell != null && !visible.Contains(grid.CurrentCell.OwningColumn))
                     grid.CurrentCell = grid.CurrentCell.OwningRow.Cells[columns.First(column => visible.Contains(column)).Index];
                 grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.None;
-                grid.AllowUserToResizeColumns = false;
+                grid.AllowUserToResizeColumns = true;
+                grid.ScrollBars = ScrollBars.Both;
                 grid.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.AutoSize;
                 foreach (DataGridViewColumn column in columns)
                 {
                     column.MinimumWidth = Math.Min(state.Minimums[column], available);
                     column.Visible = visible.Contains(column);
                     column.AutoSizeMode = DataGridViewAutoSizeColumnMode.None;
+                    column.Resizable = DataGridViewTriState.True;
                     bool text = !IsNumericColumn(column) && !IsDateColumn(column) && !IsCurrencyColumn(column);
                     column.FillWeight = column.MinimumWidth * (text && (column.HeaderText == "Контрагент" || column.HeaderText == "Название" || column.HeaderText == "Название / ФИО" || column.HeaderText == "Описание" || column.HeaderText == "Объект") ? 1.55F : 1F);
                     column.DefaultCellStyle.WrapMode = DataGridViewTriState.False;
@@ -225,7 +234,8 @@ namespace WorkLedger
                     int addition = i == displayed.Count - 1 ? remaining : (int)Math.Floor(extra * column.FillWeight / weights);
                     remaining -= addition; column.Width = column.MinimumWidth + addition;
                 }
-                grid.HorizontalScrollingOffset = 0;
+                if (resizable != null) resizable.RestoreColumnWidths();
+                if (resizable == null || !resizable.HasSavedColumnWidths) grid.HorizontalScrollingOffset = 0;
             }
             finally { grid.ResumeLayout(); state.Applying = false; }
         }
