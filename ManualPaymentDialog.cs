@@ -27,7 +27,7 @@ namespace WorkLedger
             applicationIcon=MainForm.LoadApplicationIcon();if(applicationIcon!=null)Icon=applicationIcon;
             var top=new Panel{Dock=DockStyle.Top,Height=94,Padding=new Padding(20,12,20,0)};
             top.Controls.Add(new Label{Text="Внести оплату по акту",Font=new Font("Segoe UI",18,FontStyle.Bold),Dock=DockStyle.Top,Height=36});
-            var heading=new Label{Text="Акт № "+view.Balance.Act.Get("number")+" · "+view.Balance.Party.Get("name")+"\r\nСумма: "+view.Balance.Amount.ToString("N2")+" · Оплачено: "+view.Balance.Paid.ToString("N2")+" · Осталось: "+view.Balance.Due.ToString("N2")+" "+view.Balance.Act.Get("currency"),Dock=DockStyle.Bottom,Height=48,AutoEllipsis=true};top.Controls.Add(heading);
+            var heading=new Label{Text="Акт № "+view.Balance.Act.Get("number")+" · "+view.Balance.Party.Get("name")+"\r\nВсего по акту: "+view.Balance.Amount.ToString("N2")+" · Уже оплачено: "+view.Balance.Paid.ToString("N2")+" · Осталось: "+view.Balance.Due.ToString("N2")+" "+view.Balance.Act.Get("currency"),Dock=DockStyle.Bottom,Height=48,AutoEllipsis=true};top.Controls.Add(heading);
             source.Name="paymentSource";source.AccessibleName="Новый или существующий платёж";source.DropDownStyle=ComboBoxStyle.DropDownList;
             source.Items.Add("Новая оплата — внести платёж");
             foreach(var payment in view.Payments)source.Items.Add(ServiceReminderLedger.Date(payment.Get("date")).ToString("dd.MM.yyyy")+" · "+view.Available[payment.Id].ToString("N2")+" "+payment.Get("currency")+" · "+(payment.Get("number")==""?"платёж без номера":"№ "+payment.Get("number")));
@@ -36,8 +36,8 @@ namespace WorkLedger
             method.Name="paymentMethod";method.DropDownStyle=ComboBoxStyle.DropDownList;method.Items.AddRange(new object[]{"Банк","Наличные","Другой способ"});method.SelectedIndex=0;
             number.Name="paymentNumber";number.MaxLength=200;notes.Name="paymentNotes";notes.Multiline=true;notes.AcceptsReturn=true;notes.ScrollBars=ScrollBars.Vertical;notes.MaxLength=4000;
             var fields=new TableLayoutPanel{Dock=DockStyle.Top,AutoSize=true,ColumnCount=2,Padding=new Padding(20,6,20,6)};
-            fields.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute,142));fields.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));
-            Row(fields,"Платёж",source,46);Row(fields,"Дата оплаты",date,40);Row(fields,"Сумма оплаты",amount,40);Row(fields,"Способ оплаты",method,40);Row(fields,"Номер платежа",number,40);Row(fields,"Комментарий",notes,68);
+            fields.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute,174));fields.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));
+            Row(fields,"Платёж",source,46);Row(fields,"Дата оплаты",date,40);Row(fields,"Сумма этого платежа",amount,40);Row(fields,"Способ оплаты",method,40);Row(fields,"Номер платежа",number,40);Row(fields,"Комментарий",notes,68);
             var scroll=new Panel{Dock=DockStyle.Fill,AutoScroll=true};scroll.Controls.Add(fields);
             information.Name="paymentInfo";information.Dock=DockStyle.Bottom;information.Height=86;information.Padding=new Padding(20,8,20,0);information.ForeColor=UiStyle.Muted;
             error.Name="paymentError";error.Dock=DockStyle.Bottom;error.Height=42;error.Padding=new Padding(20,0,20,0);error.ForeColor=Color.Firebrick;
@@ -47,7 +47,7 @@ namespace WorkLedger
             footer.Controls.Add(cancel);footer.Controls.Add(confirm);CancelButton=cancel;AcceptButton=confirm;
             Controls.Add(scroll);Controls.Add(information);Controls.Add(error);Controls.Add(footer);Controls.Add(top);
             source.SelectedIndexChanged+=delegate{SelectSource();};confirm.Click+=delegate{SaveConfirmation();};
-            amount.TextChanged+=delegate{UpdateRemaining();};
+            amount.TextChanged+=delegate{if(view.Balance.Due>0)error.Text="";UpdateRemaining();};
             source.SelectedIndex=view.Payments.Count>0?1:0;UiStyle.ApplyTo(this);
         }
         private static void Row(TableLayoutPanel table,string text,Control input,int height)
@@ -59,6 +59,7 @@ namespace WorkLedger
         private void SelectSource()
         {
             bool existing=source.SelectedIndex>0;Record payment=existing?view.Payments[source.SelectedIndex-1]:null;
+            confirm.Text=existing?"Зачесть платёж":"Добавить платёж";
             date.Enabled=method.Enabled=number.Enabled=notes.Enabled=!existing;
             amount.Enabled=!existing||view.Balance.Act.Get("status")=="signed";
             if(existing)
@@ -71,15 +72,20 @@ namespace WorkLedger
             }
             else
             {
-                date.Value=MonthlyServiceRuntime.Today;method.SelectedIndex=0;number.Clear();notes.Clear();SetAmount(Math.Max(0.01m,view.Balance.Due));
-                paymentHint="Можно внести часть суммы. Укажите фактически "+(view.Balance.Act.Get("direction")=="income"?"полученную":"перечисленную")+" оплату."+
-                    "\r\nКаждая оплата сохраняется отдельно. Статус подписи акта сохраняется.";
+                date.Value=MonthlyServiceRuntime.Today;method.SelectedIndex=0;number.Clear();notes.Clear();amount.Clear();
+                paymentHint="Укажите сумму, которую "+(view.Balance.Act.Get("direction")=="income"?"получили":"перечислили")+" именно в этот раз."+
+                    "\r\nПлатёж добавится к предыдущим оплатам; остаток уменьшится на эту сумму.";
             }
             UpdateRemaining();
             confirm.Enabled=view.Balance.Due>0;error.Text=view.Balance.Due<=0?"Оплата этого акта уже учтена.":"";
         }
         private void UpdateRemaining()
         {
+            if(String.IsNullOrWhiteSpace(amount.Text))
+            {
+                information.Text="К оплате осталось: "+view.Balance.Due.ToString("N2")+" "+view.Balance.Act.Get("currency")+"\r\n"+paymentHint;
+                return;
+            }
             string preview;
             try
             {

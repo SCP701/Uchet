@@ -43,7 +43,7 @@ namespace WorkLedger
                     var number = Field<TextBox>(composer, "number");
                     Check(!number.ReadOnly && number.Text == "", "new composer number is editable and automatic by default");
                     number.Text = "  12/2026-А  "; composer.RefreshDefaults();
-                    composer.WorkGrid.Rows.Add("Обслуживание", "2", "50", null);
+                    composer.WorkGrid.Rows.Add("Обслуживание", "2", "100", null);
                     Check(composer.BuildDraft().Get("number") == "12/2026-А" && store.NextActNumber == 500, "preview keeps custom number without reserving it");
                     Render(host, Path.Combine(root, external ? "create-external.png" : "create-act.png"));
                     act = composer.SaveDraft();
@@ -84,18 +84,21 @@ namespace WorkLedger
                     using (var dialog = new ManualPaymentDialog(store, act.Id))
                     {
                         Show(dialog); var amount = Field<TextBox>(dialog, "amount");
+                        Check(amount.Text == "", "each new payment starts with an empty amount");
+                        byte[] unchanged = File.ReadAllBytes(store.DataPath);
+                        Check(!dialog.SaveConfirmation() && unchanged.SequenceEqual(File.ReadAllBytes(store.DataPath)), "empty payment cannot record the whole balance");
+                        amount.Text = "100,00";
                         if (!signed)
                         {
-                            amount.Text = "40,00";
-                            Check(Field<Label>(dialog, "information").Text.Contains(60m.ToString("N2")) && Field<Label>(dialog, "information").Text.Contains("Частично оплачен"), "partial payment previews remaining 60");
+                            Check(Field<Label>(dialog, "information").Text.Contains(100m.ToString("N2")) && Field<Label>(dialog, "information").Text.Contains("Частично оплачен"), "act 200 minus this receipt 100 previews remaining 100");
                             Render(dialog, Path.Combine(root, external ? "payment-external.png" : "payment.png"));
                         }
-                        else Check(Store.ParseMoney(amount.Text) == 60m, "second payment defaults to remaining amount after signing");
+                        else Check(Field<Label>(dialog, "information").Text.Contains("Оплачен"), "second separate receipt of 100 completes payment");
                         Check(dialog.SaveConfirmation(), "payment form saved amount");
                     }
                     store = new Store(path);
                     var balance = store.GetManualPaymentView(act.Id).Balance;
-                    Check(balance.Paid == (signed ? 100m : 40m) && balance.Due == (signed ? 0m : 60m), "partial and final balances survive restart");
+                    Check(balance.Paid == (signed ? 200m : 100m) && balance.Due == (signed ? 0m : 100m), "200 minus 100 leaves 100; another 100 settles it after restart");
                     Check(balance.Status == (signed ? "Оплачен" : "Частично оплачен"), "payment status reflects actual payments");
                     using (var main = new MainForm(store, false))
                     {
@@ -108,7 +111,7 @@ namespace WorkLedger
                     }
                 }
                 var payments = store.Of("payment").ToList();
-                Check(payments.Count == 2 && payments.Sum(p => Store.ParseMoney(p.Get("amount"))) == 100m, "installments do not duplicate money");
+                Check(payments.Count == 2 && payments.All(p => Store.ParseMoney(p.Get("amount")) == 100m), "two equal receipts stay as separate payments of 100");
                 Check(store.ActDue(act.Id) == 0 && store.Of("allocation").Count() == 2, "signing and final installment credit each payment once");
                 act = store.Find(act.Id); act.Set("number", "ИТОГ-12/2026"); store.Upsert(act);
                 Check(store.Of("payment").All(p => p.Get("actId") == act.Id) && store.ActDue(act.Id) == 0, "renumbering preserves payments and allocations by id");
@@ -116,7 +119,7 @@ namespace WorkLedger
                 using (var archive = ZipFile.OpenRead(doc))
                 using (var reader = new StreamReader(archive.GetEntry("word/document.xml").Open()))
                     Check(reader.ReadToEnd().Contains("ИТОГ-12/2026"), "Word contains user number");
-                Check(QuarterlyTaxes.CalculateAllTime(store, "BYN").Receipts == (external ? 0m : 100m), "tax base counts each eligible payment once");
+                Check(QuarterlyTaxes.CalculateAllTime(store, "BYN").Receipts == (external ? 0m : 200m), "tax base counts each eligible payment once");
             }
             File.WriteAllText(Path.Combine(root, "PASS.txt"), "PASS: manual numbers, duplicate rollback, counter persistence, Word, partial and final installments, signature transition, list balances and taxes.");
         }
