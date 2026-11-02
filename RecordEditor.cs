@@ -209,11 +209,11 @@ namespace WorkLedger
                 cell.Controls.Add(input); cell.Controls.Add(label);
                 table.Controls.Add(cell, index % 2, index / 2);
                 if (index % 2 == 0) table.RowStyles.Add(new RowStyle(SizeType.Absolute, 75));
-                if (field.Key == "number" && store.Find(source.Id) == null)
+                if (field.Key == "number")
                 {
-                    var number = (TextBox)input;
-                    number.Text = "Автоматически при сохранении (" + store.NextActNumber + ")";
-                    number.ForeColor = Color.FromArgb(100, 116, 139);
+                    label.Text = "Номер акта";
+                    var help = new Label { Text = store.Find(source.Id) == null ? "Пусто — автоматически: " + store.NextActNumber : "Например: 12/2026", Dock = DockStyle.Bottom, Height = 20, ForeColor = UiStyle.Muted };
+                    cell.Controls.Add(help);
                 }
             }
             panel.Controls.Add(table); return panel;
@@ -559,8 +559,8 @@ namespace WorkLedger
                 tips.SetToolTip(text, field.Type == "money" ? "Сумма с точностью до копеек. Можно использовать запятую или точку."
                     : "Количество. Можно использовать запятую или точку.");
             }
-            if (schema.Kind == "act" && field.Key == "number" && (store.Find(source.Id) == null || source.Get("autoNumber") == "true"))
-            { text.ReadOnly = true; if (store.Find(source.Id) == null) { text.Text = ""; tips.SetToolTip(text, "Номер " + store.NextActNumber + " будет присвоен при сохранении."); } }
+            if (schema.Kind == "act" && field.Key == "number")
+            { text.MaxLength = 200; tips.SetToolTip(text, "Укажите свой номер. У нового акта можно оставить поле пустым для автоматической нумерации."); }
             if (schema.Kind == "act" && field.Key == "hours") text.ReadOnly = true;
             return text;
         }
@@ -650,7 +650,7 @@ namespace WorkLedger
                     value = date.Checked ? Store.DateString(date.Value) : "";
                 }
                 else if (field.Type == "enum" || field.Type == "ref") value = SelectedActValue(field.Key);
-                else value = field.Key == "number" && store.Find(source.Id) == null ? "" : input.Text.Trim();
+                else value = input.Text.Trim();
                 if (field.Required && value == "") throw new InvalidOperationException("Заполните поле «" + field.Label + "».");
                 if (field.Type == "money")
                 {
@@ -694,7 +694,7 @@ namespace WorkLedger
                     Choice selected = ((ComboBox)input).SelectedItem as Choice;
                     value = selected == null ? "" : selected.Value;
                 }
-                else value = schema.Kind == "act" && field.Key == "number" && store.Find(source.Id) == null ? "" : input.Text.Trim();
+                else value = input.Text.Trim();
                 string error = "";
                 if ((field.Required || monthlyServiceEnabled && IsRequiredMonthlyServiceField(field.Key)
                     || IsPaymentActField(field) && SelectedPaymentScope == "external") && String.IsNullOrWhiteSpace(value))

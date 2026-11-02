@@ -54,13 +54,14 @@ namespace WorkLedger
                 changed.Set("hourlyRate", "0"); Reject(delegate { store.Upsert(changed); });
                 Eq(store.DefaultHourlyRate, 35m);
             });
-            Test("Automatic numbers remain stable on edit and unique across counterparties", delegate {
+            Test("Automatic numbers stay stable unless explicitly changed; manual renumbering preserves the counter", delegate {
                 Store store = Fresh(root, "stable"); Record party = Party(store, "Первый"), other = Party(store, "Второй");
                 Record act = PlainAct(party.Id); store.Upsert(act);
                 Record edit = store.Find(act.Id); edit.Set("notes", "Изменено"); store.Upsert(edit); Eq(edit.Get("number"), "500"); Eq(store.NextActNumber, 501L);
-                edit.Set("number", "800"); Reject(delegate { store.Upsert(edit); }); Eq(store.Find(act.Id).Get("number"), "500");
                 Record duplicate = PlainAct(other.Id); duplicate.Set("number", "00500"); Reject(delegate { store.Upsert(duplicate); });
-                store.Archive(act.Id); Record next = PlainAct(other.Id); store.Upsert(next); Eq(next.Get("number"), "501");
+                edit.Set("number", "800"); store.Upsert(edit); Eq(store.Find(act.Id).Get("number"), "800"); Eq(edit.Get("autoNumber"), "false"); Eq(store.NextActNumber, 801L);
+                edit.Set("number", "Р-12/2026"); store.Upsert(edit); Eq(store.NextActNumber, 801L);
+                store.Archive(act.Id); Record next = PlainAct(other.Id); store.Upsert(next); Eq(next.Get("number"), "801");
             });
             Test("Hourly totals round each line to cents and survive reloading", delegate {
                 Store store = Fresh(root, "hourly"); Record party = Party(store, "Клиент");

@@ -76,7 +76,7 @@ namespace WorkLedger
                         var panel=Field<FlowLayoutPanel>(form,"actions");
                         if(!panel.Visible)continue;
                         var visible=panel.Controls.Cast<Control>().Where(c=>c.Visible).ToList();
-                        Assert(visible.Count<=5,"too many top-level controls in "+route);
+                        Assert(visible.Count<=(Catalog.IsActSection(route)?6:5),"too many top-level controls in "+route);
                         Assert(!panel.WrapContents,"command strip can wrap in "+route);
                         if(visible.Count>0)
                         {

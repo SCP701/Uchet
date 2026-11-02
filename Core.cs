@@ -413,6 +413,7 @@ namespace WorkLedger
                     Record target = staged.FirstOrDefault(r => r.Id == id);
                     if (target != null && target.Get("archived") == "true" && (old == null || old.Get(key) != id)) throw new InvalidOperationException("Нельзя привязать запись к архивному документу.");
                 }
+                if (candidate.Kind == "act") candidate.Set("number", candidate.Get("number").Trim());
                 bool automaticNumber = old == null && candidate.Kind == "act" && candidate.Get("number") == "";
                 if (automaticNumber)
                 {
@@ -420,8 +421,7 @@ namespace WorkLedger
                 }
                 if (old != null && old.Kind == "act" && old.Get("autoNumber") == "true")
                 {
-                    if (candidate.Get("number") != old.Get("number")) throw new InvalidOperationException("Автоматический номер сохранённого акта менять нельзя.");
-                    candidate.Set("autoNumber", "true");
+                    candidate.Set("autoNumber", candidate.Get("number") == old.Get("number") ? "true" : "false");
                 }
                 if (candidate.Kind == "settings") candidate.Set("nextActNumber", Math.Max(ReadActCounter(candidate.Get("nextActNumber")), NextActNumberFor(staged)).ToString(CultureInfo.InvariantCulture));
                 Normalize(candidate);
@@ -449,7 +449,7 @@ namespace WorkLedger
                     }
                 }
 
-                if (automaticNumber) StageActCounter(staged, entries);
+                if (candidate.Kind == "act") StageActCounter(staged, entries);
                 Validate(staged);
                 entries.Add(MakeAudit(old == null ? "create" : old.Get("archived") == "true" && candidate.Get("archived") != "true" ? "restore" : "update", old, candidate));
                 Commit(staged, entries);

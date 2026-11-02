@@ -19,7 +19,8 @@ namespace WorkLedger
         private Record source;
         private readonly ComboBox counterparty = new ReferencePickerCombo(), contract = new ReferencePickerCombo(), status = new ComboBox();
         private readonly DateTimePicker date = new DateTimePicker(), due = new DateTimePicker();
-        private readonly Label number = new Label(), rate = new Label(), requisites = new Label(), totals = new Label();
+        private readonly TextBox number = new TextBox();
+        private readonly Label numberHint = new Label(), rate = new Label(), requisites = new Label(), totals = new Label();
         private readonly DataGridView works = new ResizableDataGridView();
         private readonly HashSet<DataGridViewRow> customRateRows = new HashSet<DataGridViewRow>();
         private TextBox activeEditor;
@@ -60,9 +61,15 @@ namespace WorkLedger
             heading.Controls.Add(new ReferenceSelectionField((ReferencePickerCombo)counterparty, "Контрагент",
                 "Выберите контрагента", "composer-counterparty", "party") { Dock = DockStyle.Fill }, 1, 0);
             heading.Controls.Add(FieldLabel("Дата"), 2, 0); heading.Controls.Add(date, 3, 0);
-            number.AutoSize = rate.AutoSize = true; number.Margin = rate.Margin = new Padding(0, 10, 0, 6);
-            number.Font = new Font(Font, FontStyle.Bold); rate.ForeColor = Color.FromArgb(0, 119, 116);
-            heading.Controls.Add(number, 0, 1); heading.SetColumnSpan(number, 2); heading.Controls.Add(rate, 2, 1); heading.SetColumnSpan(rate, 2);
+            number.Name = "actNumber"; number.AccessibleName = "Номер акта"; number.MaxLength = 200;
+            number.Text = source == null ? "" : source.Get("number"); number.Dock = DockStyle.Top;
+            number.Margin = new Padding(0, 4, 0, 0);
+            numberHint.Dock = DockStyle.Top; numberHint.AutoSize = true; numberHint.ForeColor = UiStyle.Muted;
+            var numberField = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 1, Margin = new Padding(3) };
+            numberField.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); numberField.Controls.Add(number); numberField.Controls.Add(numberHint);
+            rate.AutoSize = true; rate.Margin = new Padding(0, 10, 0, 6); rate.ForeColor = Color.FromArgb(0, 119, 116);
+            heading.Controls.Add(FieldLabel("Номер акта"), 0, 1); heading.Controls.Add(numberField, 1, 1);
+            heading.Controls.Add(rate, 2, 1); heading.SetColumnSpan(rate, 2);
             requisites.Dock = DockStyle.Fill; requisites.Height = 68; requisites.AutoEllipsis = true;
             requisites.ForeColor = Color.FromArgb(93, 107, 124); requisites.Margin = new Padding(0, 4, 0, 4);
             heading.Controls.Add(requisites, 0, 2); heading.SetColumnSpan(requisites, 4);
@@ -197,8 +204,7 @@ namespace WorkLedger
         }
         private void RefreshDetails()
         {
-            string actTitle = externalActs ? "Акт вне № " : "Акт № ";
-            number.Text = source == null ? actTitle + store.NextActNumber + " · номер при сохранении" : actTitle + source.Get("number");
+            numberHint.Text = source == null ? "Можно оставить пустым — следующий номер " + store.NextActNumber : "Можно указать свой номер, например 12/2026.";
             rate.Text = defaultRate > 0 ? defaultRate.ToString("N2") + " " + documentCurrency + " / час · по умолчанию" : "За час: укажите в строке работы";
             var own = source == null ? store.Of("settings").FirstOrDefault() : store.GetActOrganization(source);
             var cp = source != null && SelectedId(counterparty) == source.Get("partyId") ? Store.GetActSnapshot(source, "partySnapshot") : store.Find(SelectedId(counterparty));
@@ -270,6 +276,7 @@ namespace WorkLedger
             string partyId = SelectedId(counterparty);
             if (partyId == "") throw new InvalidOperationException("Выберите контрагента.");
             Record result = source == null ? store.CreateHourlyActDraft(partyId, externalActs) : source.Clone();
+            result.Set("number", number.Text.Trim());
             result.Set("partyId", partyId); result.Set("date", Store.DateString(date.Value.Date)); result.Set("currency", documentCurrency);
             result.Set("direction", documentDirection); result.Set("contractId", SelectedId(contract));
             Record linked = store.Find(SelectedId(contract));
@@ -293,7 +300,7 @@ namespace WorkLedger
         }
         public Record SaveDraft()
         {
-            Record result = BuildDraft(); store.Upsert(result); ResultRecord = store.Find(result.Id); source = ResultRecord.Clone(); RefreshDetails();
+            Record result = BuildDraft(); store.Upsert(result); ResultRecord = store.Find(result.Id); source = ResultRecord.Clone(); number.Text = source.Get("number"); RefreshDetails();
             if (ActSaved != null) ActSaved(this, EventArgs.Empty);
             return ResultRecord;
         }

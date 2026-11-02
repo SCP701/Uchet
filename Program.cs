@@ -29,6 +29,7 @@ namespace WorkLedger
                     if (CoreTests.Run(Path.Combine(dataDir, "core-tests")) != 0) throw new Exception("Не прошли проверки расчётов.");
                     AppTests.Run(Path.Combine(dataDir, "app-tests"));
                     ManualPaymentTests.Run(Path.Combine(dataDir, "manual-payment-tests"));
+                    ActEntryTests.Run(Path.Combine(dataDir, "act-entry-tests"));
                     AttachmentSafetyTests.Run(Path.Combine(dataDir, "attachment-safety-tests"));
                     ExportRegressionTests.Run(Path.Combine(dataDir, "export-regression-tests"));
                     EditorTests.Run(Path.Combine(dataDir, "editor-tests"));

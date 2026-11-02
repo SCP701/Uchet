@@ -332,13 +332,18 @@ namespace WorkLedger
         }
         private void ConfirmSelectedPayment()
         {
-            var act=Selected();if(act==null||act.Kind!="act")return;
+            var act=Selected();if(act==null||act.Kind!="act")throw new InvalidOperationException("Выберите акт в таблице.");
             using(var dialog=new ManualPaymentDialog(store,act.Id))
                 if(dialog.ShowDialog(this)==DialogResult.OK){RefillParties();RefreshView();SelectId(act.Id);}
         }
         private void BuildRecordCommands(string kind)
         {
             actions.Controls.Add(Button("+ Добавить", Add)); actions.Controls.Add(Button("Изменить", Edit));
+            if (Catalog.IsActSection(kind))
+            {
+                var payment = Button("Внести оплату", ConfirmSelectedPayment); payment.Name = "recordPayment";
+                payment.AccessibleDescription = "Полная или частичная оплата выбранного акта"; actions.Controls.Add(payment);
+            }
             var operations = new List<MenuCommand>();
             if (Catalog.IsActSection(kind))
             {
@@ -713,7 +718,7 @@ namespace WorkLedger
                 else if (kind == "audit") actions.Controls.Add(CommandMenu("audit-file", "Файл", Command("export", "Выгрузить Excel", Export)));
                 else { actions.Controls.Add(Button("+ Новый акт", delegate { Navigate("create-act"); })); actions.Controls.Add(Button("+ Оплата", delegate { Navigate("payment"); Add(); })); actions.Controls.Add(Button("Отчёты", delegate { Navigate("reports"); })); }
                 title.Text = IsActComposerSection(kind) ? (kind == CreateExternalActSection ? "Создать акт вне" : "Создать акт") : kind == "overview" ? "Обзор" : kind == "reports" ? "Отчёты и сверка" : kind == "audit" ? "История изменений" : kind == "taxes" ? "Налоги" : Catalog.Get(kind).Title;
-                hint.Text = kind == CreateExternalActSection ? "Акт войдёт в общий учёт и сверку, вне выборки «Акты для налогового учёта»." : kind == "create-act" ? "Выберите контрагента, впишите работы, часы и цену за час. Номер и сумма рассчитываются автоматически." : kind == "overview" ? "Показатели за всё время в выбранной валюте. Напоминания — на ближайшие 7 дней."
+                hint.Text = kind == CreateExternalActSection ? "Акт войдёт в общий учёт и сверку, вне выборки «Акты для налогового учёта»." : kind == "create-act" ? "Выберите контрагента, впишите работы, часы и цену за час. Номер можно указать вручную или оставить автоматическим." : kind == "overview" ? "Показатели за всё время в выбранной валюте. Напоминания — на ближайшие 7 дней."
                     : kind == "expense" ? "Дополнительные затраты. Работы подрядчиков учитывайте актами, чтобы не посчитать расход дважды."
                     : kind == Catalog.GrayPaymentSection ? "Оплаты по «Актам вне», без налогов. «Действия → Зачесть оплату» уменьшает долг по акту."
                     : kind == "payment" ? "Белые оплаты и авансы. «Действия → Зачесть оплату» связывает их с обычными актами."
@@ -825,7 +830,7 @@ namespace WorkLedger
                 yield return r.Get("reviewStatus") == "pending" ? "Требует проверки" : r.Get("reviewStatus") == "matched" ? "Найдена связь" : r.Get("reviewStatus") == "checked" ? "Проверено" : "";
                 yield return r.Get("reviewNotes");
                 yield return Status(r); yield return F(store.AllocatedToAct(r.Id)); yield return F(store.ActGrossDue(r.Id));
-                yield return F(store.ActiveHolds(r.Id)); yield return F(store.ActDue(r.Id));
+                yield return F(store.ActiveHolds(r.Id)); yield return F(DisplayedActDue(r));
                 if (r.Get("status") == "sent") yield return "Получить подпись";
                 if (r.Get("status") == "draft") yield return "Подготовить и отправить";
             }
@@ -943,7 +948,7 @@ namespace WorkLedger
                 {
                     var row = fields.Select(f => Value(r, f)).ToList();
                     if (derivedCurrency) row.Add(Effective(r).Get("currency"));
-                    if (Catalog.IsActSection(current)) row.AddRange(new[] { F(store.AllocatedToAct(r.Id)), F(store.ActGrossDue(r.Id)), F(store.ActiveHolds(r.Id)), F(store.ActDue(r.Id)), Status(r) });
+                    if (Catalog.IsActSection(current)) row.AddRange(new[] { F(store.AllocatedToAct(r.Id)), F(store.ActGrossDue(r.Id)), F(store.ActiveHolds(r.Id)), F(DisplayedActDue(r)), Status(r) });
                     if (current == "invoice") { var a = store.Find(r.Get("actId")); row.Add(a == null ? "Акт не указан" : Status(a)); }
                     if (Catalog.IsPaymentSection(current))
                     {
@@ -999,6 +1004,11 @@ namespace WorkLedger
             if (current == "work") hint.Text = "Период — по дате сметы. Поиск учитывает наименование работ, смету, контрагента и объект.";
             if (current == "audit") hint.Text = "Поиск по описанию, пользователю и разделу. Период — по местному времени Минска.";
             if (current == "reports" && search.Text.Trim() != "") hint.Text += " Поиск применяется до расчёта итогов.";
+        }
+        private decimal DisplayedActDue(Record act)
+        {
+            ServiceBalance balance;
+            return viewManualBalances.TryGetValue(act.Id, out balance) ? balance.Due : store.ActDue(act.Id);
         }
         private string Status(Record r)
         {
