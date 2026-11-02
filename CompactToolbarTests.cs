@@ -76,7 +76,7 @@ namespace WorkLedger
                         var panel=Field<FlowLayoutPanel>(form,"actions");
                         if(!panel.Visible)continue;
                         var visible=panel.Controls.Cast<Control>().Where(c=>c.Visible).ToList();
-                        Assert(visible.Count<=(Catalog.IsActSection(route)?6:5),"too many top-level controls in "+route);
+                        Assert(visible.Count<=(Catalog.IsActSection(route)||Catalog.IsPaymentSection(route)?6:5),"too many top-level controls in "+route);
                         Assert(!panel.WrapContents,"command strip can wrap in "+route);
                         if(visible.Count>0)
                         {
@@ -88,7 +88,7 @@ namespace WorkLedger
                             RequireCommands(panel,new[]{"+ Добавить","Изменить","В архив / вернуть","Excel / CSV","Импорт"},route);
                             if(Catalog.IsActSection(route))
                                 RequireCommands(panel,new[]{"Позиции акта","Обновить реквизиты","Удалить акт","Зачесть оплату","Создать счёт","Печатная форма","Акт Word","Акт в Excel","Прикрепить файл",route==Catalog.ExternalActSection?"Все акты вне":"Все акты"},route);
-                            if(Catalog.IsPaymentSection(route))RequireCommands(panel,new[]{"Зачесть оплату","Прикрепить файл"},route);
+                            if(Catalog.IsPaymentSection(route))RequireCommands(panel,new[]{"Внести оплату","Зачесть оплату","Прикрепить файл"},route);
                             if(route=="estimate")RequireCommands(panel,new[]{"Создать акт","Печатная форма","Прикрепить файл"},route);
                             if(route=="contract"||route=="invoice")RequireCommands(panel,new[]{"Печатная форма","Прикрепить файл"},route);
                             if(route=="document")RequireCommands(panel,new[]{"Прикрепить файл","Открыть файл"},route);

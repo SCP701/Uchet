@@ -212,7 +212,7 @@ namespace WorkLedger
             if (Catalog.IsActSection(section) || section == "invoice" || section == "contract")
                 Important(grid, context, "Номер", "Дата", "Контрагент", "Сумма", "Валюта");
             else if (Catalog.IsPaymentSection(section))
-                Important(grid, context, "Номер документа", "Дата", "Контрагент", "Сумма", "Валюта");
+                Important(grid, context, "Номер документа", "Дата", "Контрагент", "Сумма", "Валюта", "Акт");
             else if (section == "document") Important(grid, context, "Название", "Дата", "Контрагент");
         }
         private static void MainLists(Fixture f, string root)

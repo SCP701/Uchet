@@ -336,13 +336,32 @@ namespace WorkLedger
             using(var dialog=new ManualPaymentDialog(store,act.Id))
                 if(dialog.ShowDialog(this)==DialogResult.OK){RefillParties();RefreshView();SelectId(act.Id);}
         }
+        internal ReferencePickerDialog CreatePaymentActPicker()
+        {
+            bool external = current == Catalog.GrayPaymentSection;
+            var balances = ServiceReminderLedger.BuildBalances(store.Records, MonthlyServiceRuntime.Today, true)
+                .Where(b => Store.IsExternalAct(b.Act) == external && b.Due > 0).ToList();
+            if (balances.Count == 0) throw new InvalidOperationException(external ? "Нет актов вне с остатком к оплате." : "Нет актов с остатком к оплате в этом разделе. Для аванса без акта используйте «+ Добавить».");
+            var choices = balances.Select(b => new ReferencePickerEntry(b.Act.Id,
+                "№ " + b.Act.Get("number") + " · " + b.Party.Get("name") + " · осталось " + F(b.Due) + " " + b.Act.Get("currency"))).ToList();
+            return new ReferencePickerDialog(store, "act", "Акт для оплаты", choices, "", false, "", "");
+        }
+        private void RecordPaymentFromPayments()
+        {
+            using (var picker = CreatePaymentActPicker())
+            {
+                if (picker.ShowDialog(this) != DialogResult.OK) return;
+                using (var dialog = new ManualPaymentDialog(store, picker.SelectedId))
+                    if (dialog.ShowDialog(this) == DialogResult.OK) { RefillParties(); FocusRecord(dialog.Payment); }
+            }
+        }
         private void BuildRecordCommands(string kind)
         {
             actions.Controls.Add(Button("+ Добавить", Add)); actions.Controls.Add(Button("Изменить", Edit));
-            if (Catalog.IsActSection(kind))
+            if (Catalog.IsActSection(kind) || Catalog.IsPaymentSection(kind))
             {
-                var payment = Button("Внести оплату", ConfirmSelectedPayment); payment.Name = "recordPayment";
-                payment.AccessibleDescription = "Полная или частичная оплата выбранного акта"; actions.Controls.Add(payment);
+                var payment = Button("Внести оплату", Catalog.IsActSection(kind) ? (Action)ConfirmSelectedPayment : RecordPaymentFromPayments); payment.Name = "recordPayment";
+                payment.AccessibleDescription = "Внести отдельный платёж по акту"; actions.Controls.Add(payment);
             }
             var operations = new List<MenuCommand>();
             if (Catalog.IsActSection(kind))
@@ -720,8 +739,8 @@ namespace WorkLedger
                 title.Text = IsActComposerSection(kind) ? (kind == CreateExternalActSection ? "Создать акт вне" : "Создать акт") : kind == "overview" ? "Обзор" : kind == "reports" ? "Отчёты и сверка" : kind == "audit" ? "История изменений" : kind == "taxes" ? "Налоги" : Catalog.Get(kind).Title;
                 hint.Text = kind == CreateExternalActSection ? "Акт войдёт в общий учёт и сверку, вне выборки «Акты для налогового учёта»." : kind == "create-act" ? "Выберите контрагента, впишите работы, часы и цену за час. Номер можно указать вручную или оставить автоматическим." : kind == "overview" ? "Показатели за всё время в выбранной валюте. Напоминания — на ближайшие 7 дней."
                     : kind == "expense" ? "Дополнительные затраты. Работы подрядчиков учитывайте актами, чтобы не посчитать расход дважды."
-                    : kind == Catalog.GrayPaymentSection ? "Оплаты по «Актам вне», без налогов. «Действия → Зачесть оплату» уменьшает долг по акту."
-                    : kind == "payment" ? "Белые оплаты и авансы. «Действия → Зачесть оплату» связывает их с обычными актами."
+                    : kind == Catalog.GrayPaymentSection ? "Каждый платёж по акту вне — отдельная строка. «Внести оплату» — выбрать акт и указать сумму этого платежа."
+                    : kind == "payment" ? "Каждый платёж — отдельная строка. «Внести оплату» — выбрать акт и указать сумму; «+ Добавить» — аванс без акта."
                     : kind == Catalog.ExternalActSection ? "Акты вне входят в общий учёт и сверку, вне выборки «Акты для налогового учёта»."
                     : kind == "act" ? "В задолженность входят подписанные акты. Удержания показываются отдельно от суммы к оплате."
                     : kind == "taxes" ? "Выберите период и валюту. В расчёт входят белые поступления; серые оплаты исключены."
